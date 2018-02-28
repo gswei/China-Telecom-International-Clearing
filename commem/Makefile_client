@@ -1,0 +1,30 @@
+#
+# Makefile
+#
+# $Id: Makefile 1736 2012-10-26 01:51:20Z zhenghb $
+#
+# Makefile for db  project
+#
+
+
+include $(POCO_BASE)/build/rules/global
+include $(POCO_BASE)/build/rules/oracle
+
+
+INCDIR=$(SETTLEDIR)/src/shell/include
+JSINCLUDEDIR=$(SETTLEDIR)/src/zhjs/share
+POCO_ADD_INCLUDE+=$(INCDIR1) $(INCDIR) $(INCDIR)/public $(INCDIR)/public/Process $(INCDIR)/public/table \
+	$(INCDIR)/public/stl_hash $(INCDIR)/public/rapidxml $(INCDIR)/public/InfoData $(INCDIR)/business/psomc \
+	$(JSINCLUDEDIR)/commonlib/include $(JSINCLUDEDIR)/commonmemory/include $(JSINCLUDEDIR)/pluginengine/include
+
+
+objects = Mem_client CommonMemClient BlockAllocator C_NRWLock RecordList CommonMemIndex CommonMemLenIndex CommonMemAVLIndex CommonMemRecord CommonMemTable
+
+
+target         = jsmemclient
+target_version = 1.0
+target_libs    = common
+target_libs_shell = 
+
+
+include $(POCO_BASE)/build/rules/exec

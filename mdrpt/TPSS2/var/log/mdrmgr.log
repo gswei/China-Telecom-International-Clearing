@@ -1,0 +1,635 @@
+0023:.:0:3:14=48041e4b:16=47d21313:0023:.:0:3:14=48041e4b:16=47d21313:0023:.:0:3:14=48041e4b:16=47d21313:0037:ut-MdrNodeApi.cpp:01C5A:1:14=557CE310:16=47d21313:// $Header$
+
+//#include <Timestamp.h>
+#include <sys/time.h>
+#include <stdarg.h>
+#include <unistd.h>
+#include <MdrNodeApi.h>
+
+int _Loops = 0;
+int _Pause = 0;
+
+void usage(const char* exename);
+void pause(const char* fmt, ...);
+MdrStatus getters();
+void masterAudit(MdrAuditInfo& audit_info, int count);
+void cmtResult(const MdrAuditInfo& audit_info);
+void fillMasterAuditInfo(MdrAuditInfo& audit_info, int count);
+void slaveSyncVarList(std::vector<MdrVarInfo>& var_list);
+void slaveAudit(const MdrVarInfo& var_info, MdrAuditInfo& audit_info);
+
+int main(int argc, char* const* argv)
+{
+    if (argc != 3)
+        usage(argv[0]);
+    _Loops = atoi(argv[1]);
+    _Pause = atoi(argv[2]);
+
+    int c;
+    MdrStatus stat_ = getters();
+    if (stat_ == MDR_STATUS_SLAVE) {
+        while (_Loops > 0) {
+            std::vector<MdrVarInfo> var_list_;
+            slaveSyncVarList(var_list_);
+            for (int i = 0; i < var_list_.size(); ++ i) {
+                MdrVarInfo var_info_ = var_list_.at(i);
+                MdrAuditInfo audit_info_;
+
+                pause("%s,%d-->press enter continue SLAVE mdr_Audit", __FILE__, __LINE__);
+                slaveAudit(var_info_, audit_info_);
+
+                pause("%s,%d-->press enter continue SLAVE mdr_CmtResult", __FILE__, __LINE__);
+                cmtResult(audit_info_);
+                _Loops --;
+            }
+        }
+        printf("%s,%d-->SLAVE loops done\n", __FILE__, __LINE__);
+    } else {
+        for (int i = 1; i <= _Loops; ++ i) {
+            pause("%s,%d-->press enter continue mdr_Audit", __FILE__, __LINE__);
+            MdrAuditInfo audit_info_;
+            masterAudit(audit_info_, i);
+
+            pause("%s,%d-->press enter continue mdr_CmtResult", __FILE__, __LINE__);
+            cmtResult(audit_info_);
+        }
+    }
+
+    ::sleep(1);
+    exit(0);
+}
+
+void usage(const char* exename)
+{
+    printf("usage: %s loops pause\n", exename);
+    printf("eg   : %s 1 1    ## just once, pause for mdr_Audit & mdr_CmtResult\n", exename);
+    printf("eg   : %s 10 0   ## 10 times, no pause\n", exename);
+    exit(1);
+}
+
+void pause(const char* fmt, ...)
+{
+    if (_Pause == 0)
+        return;
+    char buf_[2048];
+    if (fmt != NULL) {
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(buf_, sizeof(buf_) - 1, fmt, ap);
+        va_end(ap);
+        printf("%s\n", buf_);
+        int c = getchar();
+    }
+}
+
+MdrStatus getters()
+{
+    MdrRetCode rc_;
+
+    rc_ = mdr_InitPlatform();
+    printf("%s,%d-->mdr_InitPlatform, rc_=%d, (rc=>0:SUCCESS,1:FAILURE,-1:INVALID)\n", __FILE__, __LINE__, rc_);
+    if (rc_ != MDR_SUCCESS) {
+        printf("%s,%d-->FATAL! mdr_InitPlatform failed\n", __FILE__, __LINE__);
+        exit(1);
+    }
+
+    MdrStatus stat_;
+    rc_ = mdr_GetDRStatus(stat_);
+    printf("%s,%d-->mdr_GetDRStatus, rc_=%d, stat_=%d, (stat=>0:MASTER,1:SLAVE,2:NODR)\n", __FILE__, __LINE__, rc_, stat_);
+    if (rc_ != MDR_SUCCESS) {
+        printf("%s,%d-->FATAL! mdr_GetDRStatus failed\n", __FILE__, __LINE__);
+        exit(1);
+    }
+
+    MdrNodeType node_type_;
+    rc_ = mdr_GetNodeType(node_type_);
+    printf("%s,%d-->mdr_GetNodeType, rc_=%d, node_type_=%d (node_type=>0:DUPLEX,1:SINGLE)\n", __FILE__, __LINE__, rc_, node_type_);
+    if (rc_ != MDR_SUCCESS) {
+        printf("%s,%d-->FATAL! mdr_GetNodeType failed\n", __FILE__, __LINE__);
+        exit(1);
+    }
+
+    rc_ = mdr_GetNodeTypeSR(node_type_);
+    printf("%s,%d-->mdr_GetNodeTypeSR, rc_=%d, sr_node_type_=%d\n", __FILE__, __LINE__, rc_, node_type_);
+    if (rc_ != MDR_SUCCESS) {
+        printf("%s,%d-->FATAL! mdr_GetNodeTypeSR failed\n", __FILE__, __LINE__);
+        exit(1);
+    }
+
+    return stat_;
+}
+
+void masterAudit(MdrAuditInfo& audit_info, int count)
+{
+    fillMasterAuditInfo(audit_info, count);
+    MdrRetCode rc_ = mdr_Audit(audit_info);
+    std::string audit_info_str_;
+    audit_info.toStr(audit_info_str_);
+    printf("%s,%d-->mdr_Audit, rc_=%d, %s\n", __FILE__, __LINE__, rc_, audit_info_str_.data());
+    if (rc_ != MDR_SUCCESS) {
+        printf("%s,%d-->FATAL! mdr_Audit failed\n", __FILE__, __LINE__);
+        exit(1);
+    }
+}
+
+void cmtResult(const MdrAuditInfo& audit_info)
+{
+    MdrRetCode rc_ = mdr_CmtResult(audit_info);
+    std::string audit_info_str_;
+    audit_info.toStr(audit_info_str_);
+    printf("%s,%d-->mdr_CmtResult, rc_=%d, %s\n", __FILE__, __LINE__, rc_, audit_info_str_.data());
+    if (rc_ != MDR_SUCCESS) {
+        printf("%s,%d-->FATAL! mdr_CmtResult failed\n", __FILE__, __LINE__);
+        exit(1);
+    }
+}
+
+void fillMasterAuditInfo(MdrAuditInfo& audit_info, int count)
+{
+    int pid_ = getpid();
+    char buf_[1024];
+    audit_info.node = "TPSS1";
+    audit_info.srvContext = "srvContext";
+    sprintf(buf_, "auditKey_%d_%d", pid_, count);
+    audit_info.auditKey = buf_;
+    sprintf(buf_, "auditVal_%d_%d", pid_, count);
+    audit_info.auditVal = buf_;
+    sprintf(buf_, "sessionId_%d_%d", pid_, count);
+    audit_info.sessionId = buf_;
+    audit_info.rflag = 2;                       // must fill 2
+    audit_info.syncVar = audit_info.auditVal;	// use '$syncVar' to transfer '$auditVal' to SLAVE
+
+    struct timeval tv_;
+    ::gettimeofday(&tv_, NULL);
+    tv_.tv_sec --;
+    struct tm tm_;
+    ::localtime_r(&tv_.tv_sec, &tm_);
+    char tmp_[64];
+    strftime(tmp_, sizeof(tmp_), "%Y%m%d%H%M%S", &tm_);
+    sprintf(buf_, "%s.%06d", tmp_, (int)(tv_.tv_usec % 1000000));
+    audit_info.ccrRcvTime = buf_;
+
+    tv_.tv_sec --;
+    ::localtime_r(&tv_.tv_sec, &tm_);
+    strftime(tmp_, sizeof(tmp_), "%Y%m%d%H%M%S", &tm_);
+    sprintf(buf_, "%s.%06d", tmp_, (int)(tv_.tv_usec % 1000000));
+    audit_info.ccrEvtTime = buf_;
+    
+    audit_info.result = 0;
+
+    /*
+    Timestamp now_(true);
+    now_ += (-1000000) * 2;
+    audit_info.ccrEvtTime = now_.toStr(Timestamp::TsFmt14, 6, '.');
+    now_ += (-1000000);
+    audit_info.ccrRcvTime = now_.toStr(Timestamp::TsFmt14, 6, '.');
+    */
+}
+
+void slaveSyncVarList(std::vector<MdrVarInfo>& var_list)
+{
+    MdrRetCode rc_;
+    while (true) {
+        rc_ = mdr_SyncVarList(var_list);
+        if (rc_ != MDR_SUCCESS) {
+            printf("%s,%d-->HEY! mdr_SyncVarList error, rc_=%d\n", __FILE__, __LINE__, rc_);
+            sleep(1);
+            return;
+        }
+        if (var_list.size() > 0) {
+            printf("%s,%d-->mdr_SyncVarList got %ld elems, %s\n",
+                __FILE__, __LINE__, var_list.size(), var_list[0].toStr().data());
+            return;
+        }
+        sleep(1);
+    }
+}
+
+void slaveAudit(const MdrVarInfo& var_info, MdrAuditInfo& audit_info)
+{
+    audit_info.node = "TPSS2";
+    audit_info.srvContext = "srvContext";
+    audit_info.rflag = 2;                               // must fill 2
+    audit_info.auditKey = var_info.sKey;
+    audit_info.sessionId = var_info.sSessionID;
+    audit_info.auditVal = var_info.syncVar;
+    audit_info.ccrEvtTime = "20000101000000";           // SLAVE side: dummy value to pass fmt validation
+    audit_info.ccrRcvTime = "20000101000000.000000";    // SLAVE side: dummy value to pass fmt validation
+
+    MdrRetCode rc_ = mdr_Audit(audit_info);
+    printf("%s,%d-->mdr_Audit, rc_=%d, %s\n", __FILE__, __LINE__, rc_, audit_info.toStr().data());
+    if (rc_ != MDR_SUCCESS) {
+        printf("%s,%d-->FATAL! mdr_Audit failed\n", __FILE__, __LINE__);
+        exit(1);
+    }
+}
+
+0023:.:0:3:14=48041e4b:16=47d21313:0039:newcommonplugin:000000000:2:14=48041e4b:16=47d21313:0031:include:000000000:2:14=48041e4b:16=47d21313:0037:200SPAnaCalledNo.h:0B20:1:14=557CE343:16=47d21313: /****************************************************************
+ filename: 200SPAnaCalledNo.h
+ module: 用户自定义插件头文件
+ created by:	ouyh
+ create date:	2010-09-20
+ version: 3.0.0
+ description: 
+	声讯SP稽核
+ update:
+  2007-12-18	修改分析区号的时候输出用于分拣的标志NGD到本地网字段
+  				同时增加回写原来的被叫号码
+  2007-12-19	修改回写被叫号码所用的函数
+  				修改NGD的分拣方法，一旦判出来是NGD，直接返回
+ *****************************************************************/
+
+#ifndef C_200SPANACALLEDNO_H
+#define C_200SPANACALLEDNO_H
+
+#include "CF_CPlugin.h"
+#include "ComFunction.h"
+
+/*
+const int IVR_LACK_CARD_LOCATION = 501;
+const int IVR_LACK_CALLEDNO = 502;
+const int IVR_LACK_TOLLCODE = 506;
+const int IVR_LACK_TOLLCODE_LOCALNET = 503;
+const int IVR_LACK_CALLEDNO_TELENO_PROPERTY = 504;
+const int IVR_LACK_CALLEDNO_TOLLCODE = 505;
+*/
+
+
+class C_200SPAnaCalledNo: public BasePlugin
+{
+public:
+	/*
+	C_200SPAnaCalledNo();
+	~C_200SPAnaCalledNo();
+
+	int execute(BufferParser& bps,ResParser& retValue){	return 0;}
+	int execute(PacketParser& pps,ResParser& retValue);
+	char* execute( PacketParser& pps ){ return "true"; };
+
+	int init();
+	bool commem_init();
+	*/
+
+	C_200SPAnaCalledNo();
+	~C_200SPAnaCalledNo();
+	void init(char *szSourceGroupID, char *szServiceID, int index);
+	void execute(PacketParser& pps,ResParser& retValue);
+	void message(MessageParser&  pMessage);
+	std::string getPluginName();
+	std::string getPluginVersion();
+	void printMe();
+public:
+	char CalledNo[RECORD_LENGTH+1];
+	char CalledNo_Ana[RECORD_LENGTH+1];
+	char Call_Location[RECORD_LENGTH+1];
+	char Card_Location[RECORD_LENGTH+1];
+	char CdrBegin[RECORD_LENGTH+1];
+	char ServCatId[RECORD_LENGTH+1];
+
+	char Tollcode[RECORD_LENGTH+1];
+
+	int m_iTollcodeOffset;
+	int m_iLocalnetOffset;
+	int m_iTelenoServiceOffset;
+
+private:	
+	char abn_value[RECORD_LENGTH+1];
+	char abn_content[RECORD_LENGTH+1];
+
+	DataStruct m_InData;
+	DataStruct m_OutData;
+	BaseAccessMem *table;
+
+	int lackinfo;
+	char lackreason[RECORD_LENGTH+1];
+
+	/*
+	char m_szLastSource[RECORD_LENGTH];
+	int m_iMaxCallingDelLen;
+	int m_iMinCallingDelLen;
+	int m_iMaxCalledDelLen;
+	int m_iMinCalledDelLen;
+	bool setAllTabItemNum();
+	bool setAllTabShmIndex();
+	bool setAllTabSemIndex();
+	bool setAllTabShmAddr();
+	void newAllStruct();
+	void deleteAllStruct();
+	*/
+
+
+protected:
+	bool anaTollcode(PacketParser& pps, ResParser& retValue);
+	bool anaFeeType(PacketParser& pps, ResParser& retValue);
+	bool anaLocalnet(PacketParser& pps, ResParser& retValue);
+	bool andService_id(PacketParser& pps, ResParser& retValue);
+
+	bool checkFormat(const char *cmpString,const char *format);
+	//bool shm_table_init();
+};
+
+#endif
+
+0034:AnaCallDirect.h:06E2:1:14=557CE343:16=47d21313:/****************************************************************
+ filename: AnaCallDirect.h
+ module: 用户自定义插件头文件
+ created by:	ouyh
+ create date:	2010-06-24
+ version: 3.0.0
+ description: 
+	20080121 修改成不返回无资料代码
+ update:
+
+ *****************************************************************/
+
+#ifndef C_AnaCallDirect_H
+#define C_AnaCallDirect_H
+
+#include "CF_CPlugin.h"
+#include "ComFunction.h"
+
+bool checkFormat(const char *cmpString,const char *format);
+
+class C_AnaCallDirect : public BasePlugin
+{
+public: 
+	C_AnaCallDirect();
+	~C_AnaCallDirect();
+	//int init();	
+	
+	void init(char *szSourceGroupID, char *szServiceID, int index);
+	void execute(PacketParser& pps,ResParser& retValue);
+	void message(MessageParser&  pMessage);
+	std::string getPluginName();
+	std::string getPluginVersion();
+	void printMe();
+
+/*
+	int execute(BufferParser& bps,ResParser& retValue){	return 0;}
+	int execute(PacketParser& pps,ResParser& retValue);
+	char* execute( PacketParser& pps ){ return "true"; };*/
+private:
+	char m_szServiceId[RECORD_LENGTH+1];
+//	char m_szIniPath[RECORD_LENGTH+1];
+	char m_szSourceGroupId[RECORD_LENGTH+1];
+	char m_szServerId[RECORD_LENGTH+1];
+	int iVersion;
+	int iIndex;
+
+	char m_szTableName[TABLENAME_LEN+1];
+	int m_iTableOffset;
+
+	//int m_ProcessId;
+	char SERV_CAT_ID[RECORD_LENGTH+1];
+	//int sync_index_plugin_tollcode;
+
+//	CommonMemClient* table_tollcode;
+	BaseAccessMem *table;
+	
+	//记录相关信息
+	char tollcode1[RECORD_LENGTH+1];
+	char tollcode2[RECORD_LENGTH+1];
+	
+	char region1[RECORD_LENGTH+1];
+	char region2[RECORD_LENGTH+1];
+	
+	DataStruct in;
+	DataStruct out;
+};
+
+
+
+
+
+
+#endif
+
+
+0034:CalledRegular.h:0912:1:14=557CE343:16=47d21313:/****************************************************************
+ filename: CalledRegular.h
+ module: 用户自定义插件头文件
+ created by:	ouyh
+ create date:	2010-06-24
+ version: 3.0.0
+ description: 
+            用于整合业务长途计费业务计费阶段被叫号码规整，用于后续分析
+            主要功能: 
+				结合号码资料，对主叫、被叫、计费等号码统一规整为"区号+号码"的格式，被叫接入码输出到指定字段。
+ update:
+
+ *****************************************************************/
+
+#ifndef _CALLEDREGULAR_H_
+#define _CALLEDREGULAR_H_	1
+ 
+#include "CF_CPlugin.h"
+#include "CallNumber.h"
+
+class C_CalledRegular: public BasePlugin
+{
+
+private:
+	
+	C_CallNumber m_callnumber;
+	BaseAccessMem *table;
+
+	int Init( PacketParser& pps );
+	int getInputParams( PacketParser& pps );
+	int sendOutputParams(ResParser& pps);
+	int setParam();
+	int getParam();
+
+	//用于输入的字段
+	//char m_szPipeId[FIELD_LEN+1];
+	//int m_iProcessId;
+	char m_szServiceId[FIELD_LEN+1];
+	char m_szSourceGroupId[FIELD_LEN+1];
+	char m_szServCatId[FIELD_LEN+1];
+	char m_szSourceId[FIELD_LEN+1];
+	char m_szIniPath[PATH_NAME_LEN+1];
+	char m_szCallNbr[FIELD_LEN+1];
+	char m_szNbrType[FIELD_LEN+1];
+	char m_szCdrBegin[FIELD_LEN+1];
+	char m_szDealType[FIELD_LEN+1];
+	char m_szDefTollcode[FIELD_LEN+1];
+
+	//用于输出的字段
+	char m_szBefTollTel[FIELD_LEN+1];//接入码
+	char m_szTollTel[FIELD_LEN+1];//带0区号+号码（固话或手机号码）
+	char m_szAfterTollTel[FIELD_LEN+1];	//号码（固话或手机号码）
+	char m_szTollcode[FIELD_LEN+1];//带0区号
+	char m_szCallNumber[FIELD_LEN+1];//接入码+带0区号+号码（固话或手机号码）
+
+	int m_iAbnReason;
+	char m_sAbnReason[FIELD_LEN+1];//无资料原因
+	char m_szAbnField[FIELD_LEN+1];//无资料内容
+	char m_LastSerCatId[FIELD_LEN+1];
+	char m_LastSourceId[FIELD_LEN+1];
+
+	int initFlag;
+
+public:
+	
+	C_CalledRegular();
+	~C_CalledRegular();
+	void init(char *szSourceGroupID, char *szServiceID, int index);
+	void execute(PacketParser& pps,ResParser& retValue);
+	void message(MessageParser&  pMessage);
+	std::string getPluginName();
+	std::string getPluginVersion();
+	void printMe();
+
+	//int execute(PacketParser& pps,ResParser& retValue);
+	int reOutputNum(PacketParser & pps,ResParser& retValue);
+};
+
+#endif
+
+
+002E:CallFee.h:067E:1:14=557CE343:16=47d21313:/****************************************************************
+ filename: CallFee.h
+ module: 用户自定义插件头文件
+ created by:	ouyh
+ create date:	2010-07-04
+ version: 3.0.0
+ description: 
+            主要功能: 计费免费分析
+ update:
+
+ *****************************************************************/
+#ifndef _C_CALLFEE_H_
+#define _C_CALLFEE_H_	1
+ 
+#include "CF_CPlugin.h"
+//#include "C_AccessShm.h"
+#include "CallNumber.h"
+
+class C_CallFee: public BasePlugin
+{
+
+private:
+	C_CallNumber m_callnumber;
+	BaseAccessMem *table;
+
+	int Init( PacketParser& pps );
+	int getInputParams( PacketParser& pps );
+	int sendOutputParams(ResParser& pps);
+	int setParam();
+	int getParam();
+
+	int initFlag;
+
+	//用于输入的字段
+	char m_szSourceGroupId[FIELD_LEN+1];
+	char m_szServiceId[FIELD_LEN+1];
+	char m_szServCatId[FIELD_LEN+1];
+	char m_szSourceId[FIELD_LEN+1];
+	char m_szBefTollcode[FIELD_LEN+1];
+	char m_szCallNbr[FIELD_LEN+1];
+	char m_szNbrType[FIELD_LEN+1];
+	char m_szCdrBegin[FIELD_LEN+1];
+
+	//用于输出的字段
+	char m_szChargeFlag[FIELD_LEN+1];//接入码
+
+	int m_iAbnReason;
+	char m_sAbnReason[FIELD_LEN+1];//无资料原因
+	char m_szAbnField[FIELD_LEN+1];//无资料内容
+
+	char m_LastSerCatId[FIELD_LEN+1];
+	char m_LastSourceId[FIELD_LEN+1];
+
+public:
+	C_CallFee();
+	~C_CallFee();
+	void init(char *szSourceGroupID, char *szServiceID, int index);
+	void execute(PacketParser& pps,ResParser& retValue);
+	void message(MessageParser&  pMessage);
+	std::string getPluginName();
+	std::string getPluginVersion();
+	void printMe();
+};
+
+
+
+
+#endif
+
+
+ 
+0035:CallingRegular.h:092A:1:14=557CE343:16=47d21313:/****************************************************************
+ filename: CallNumber.h
+ module: 用户自定义插件头文件
+ created by:	ouyh
+ create date:	2010-07-04
+ version: 3.0.0
+ description: 
+            用于整合业务长途计费业务计费阶段主叫号码规整，用于后续分析
+            主要功能: 
+				结合号码资料，对主叫、被叫、计费等号码统一规整为"区号+号码"的格式，被叫接入码输出到指定字段。
+ update:
+
+ *****************************************************************/
+
+#ifndef _CALLINGREGULAR_H_
+#define _CALLINGREGULAR_H_	1
+ 
+#include "CF_CPlugin.h"
+//#include "C_AccessShm.h"
+#include "CallNumber.h"
+
+/* C_CallingRegular Class */
+class C_CallingRegular: public BasePlugin
+{
+private:
+	C_CallNumber m_callnumber;
+	BaseAccessMem *table;
+
+	int Init( PacketParser& pps );
+	int getInputParams( PacketParser& pps );
+	int sendOutputParams(ResParser& pps);
+	int setParam();
+	int getParam();
+	
+//用于输入的字段
+	char m_szSourceGroupId[FIELD_LEN+1];
+	//int m_iProcessId;
+	char m_szServiceId[FIELD_LEN+1];
+	char m_szServCatId[FIELD_LEN+1];
+	char m_szSourceId[FIELD_LEN+1];
+	char m_szIniPath[PATH_NAME_LEN+1];
+	char m_szCallNbr[FIELD_LEN+1];
+	char m_szNbrType[FIELD_LEN+1];
+	char m_szCdrBegin[FIELD_LEN+1];
+	char m_szDealType[FIELD_LEN+1];
+	char m_szDefTollcode[FIELD_LEN+1];
+
+
+//用于输出的字段
+	char m_szBefTollTel[FIELD_LEN+1];//接入码
+	char m_szTollTel[FIELD_LEN+1];//带0区号+号码（固话或手机号码）
+	char m_szAfterTollTel[FIELD_LEN+1];	//号码（固话或手机号码）
+	char m_szTollcode[FIELD_LEN+1];//带0区号
+	char m_szCallNumber[FIELD_LEN+1];//接入码+带0区号+号码（固话或手机号码）
+
+	int m_iAbnReason;
+	char m_sAbnReason[FIELD_LEN+1];//无资料原因
+	char m_szAbnField[FIELD_LEN+1];//无资料内容
+	char m_LastSerCatId[FIELD_LEN+1];
+	char m_LastSourceId[FIELD_LEN+1];
+
+	int initFlag;
+
+public:
+	
+	C_CallingRegular();
+	~C_CallingRegular();
+	void init(char *szSourceGroupID, char *szServiceID, int index);
+	void execute(PacketParser& pps,ResParser& retValue);
+	void message(MessageParser&  pMessage);
+	std::string getPluginName();
+	std::string getPluginVersion();
+	void printMe();
+
+	//int execute(PacketParser& pps,ResParser& retValue);
+	int reOutputNum(PacketParser &

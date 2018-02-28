@@ -1,0 +1,22 @@
+#
+# $Id: Makefile 1736 2012-10-26 01:51:20Z zhenghb $
+#
+# Makefile for db  project
+#
+include $(POCO_BASE)/build/rules/global
+include $(POCO_BASE)/build/rules/oracle
+POCO_ADD_INCLUDE +=$(SETTLEDIR)/src/app/project/Shellcrontab/include
+POCO_ADD_INCLUDE +=/home/oracle/product/RAC10g/rdbms/public
+POCO_ADD_INCLUDE +=$(SETTLEDIR)/src/shell/include
+POCO_ADD_INCLUDE +=$(SETTLEDIR)/dblink_work_path/lib3.0
+#POCO_ADD_LIBRARY +=$(SETTLEDIR)/dblink_work_path/lib3.0
+
+
+objects = ShellCrontab paramConfigParse
+
+target         = psShellCrontab
+target_version = 1.0
+target_libs    = dbutil PocoFoundation PocoUtil PocoXML
+USERLIBS += $(SETTLEDIR)/dblink_work_path/lib3.0/common.a
+
+include $(POCO_BASE)/build/rules/exec

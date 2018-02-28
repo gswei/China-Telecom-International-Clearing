@@ -1,0 +1,176 @@
+/*******************************************************************
+*******************************************************************/
+#include "ChargeType.h"
+
+CChargeType::CChargeType()
+{
+  m_iRecordCount = 0;
+  m_ChargeType = NULL;
+}
+
+CChargeType::~CChargeType()
+{
+  clear();
+}
+
+bool CChargeType::clear()
+{
+  if (m_ChargeType)
+  {
+    delete[] m_ChargeType;
+    m_ChargeType = NULL;
+  }
+  m_iRecordCount = 0;
+  return true;
+}
+
+bool CChargeType::init(char *szTableName, char *szDebug)
+{
+  int i, iCount;
+  char szSqlTmp[SQL_LEN+1];
+  char szLogStr[LOG_MSG_LEN+1];
+
+  sprintf(szDebugFlag, "%s", szDebug);
+  CBindSQL ds(DBConn);
+  sprintf(szSqlTmp, "select count(*) from %s", szTableName);
+  ds.Open(szSqlTmp, SELECT_QUERY);
+  ds>>iCount;
+  ds.Close();
+
+  m_ChargeType=new SChargeType[iCount];
+  if (!m_ChargeType)
+  {
+	  sprintf(szLogStr, "new m_ChargeType fail.");
+		jsexcp::CException e(-1, szLogStr, __FILE__, __LINE__);
+		throw e;	  
+  }
+
+  sprintf(szSqlTmp, "select CHARGE_TYPE, COLINDEX_FEE_A, COLINDEX_FEE_B, COLINDEX_FEE_ADD_A, COLINDEX_FEE_ADD_B, COLINDEX_METER_COUNT, COLINDEX_CDR_DURATION, COLINDEX_RATE_DURATION, COLINDEX_RULE_NO, COLINDEX_RATEGROUP_ID, COLINDEX_TARIFF_ID, COLINDEX_REPNO_A, COLINDEX_REPNO_B, COLINDEX_CDR_COUNT, CHARGE_STYLE, COLINDEX_RATE_A, COLINDEX_RATE_B, COLINDEX_RATE_ADD_A, COLINDEX_RATE_ADD_B, COLINDEX_REPNO_CDRDURATION, COLINDEX_REPNO_RATEDURATION, COLINDEX_REPNO_CDRCOUNT from %s ORDER BY CHARGE_TYPE", szTableName);
+  ds.Open(szSqlTmp, SELECT_QUERY);
+  //***********************************************************
+  // Repeat reading all record
+  //***********************************************************
+  for (i=0; i<iCount; i++) 
+  {
+    ds>>m_ChargeType[i].iChargeType>>m_ChargeType[i].iColindexFeeA>>
+      m_ChargeType[i].iColindexFeeB>>m_ChargeType[i].iColindexFeeAddA>>
+      m_ChargeType[i].iColindexFeeAddB>>m_ChargeType[i].iColindexMeterCount>>
+      m_ChargeType[i].iColindexCdrDuration>>m_ChargeType[i].iColindexRateDuration>>
+      m_ChargeType[i].iColindexRuleNo>>m_ChargeType[i].iColindexRategroupId>>
+      m_ChargeType[i].iColindexTariffId>>m_ChargeType[i].iColindexRepnoA>>
+      m_ChargeType[i].iColindexRepnoB>>m_ChargeType[i].iColindexCdrCount>>
+      m_ChargeType[i].iChargeStyle>>m_ChargeType[i].iColindexRateA>>
+      m_ChargeType[i].iColindexRateB>>m_ChargeType[i].iColindexRateAddA>>
+      m_ChargeType[i].iColindexRateAddB>>m_ChargeType[i].iColindexRepnoCdrduration>>
+      m_ChargeType[i].iColindexRepnoRateduration>>m_ChargeType[i].iColindexRepnoCdrcount;
+  } //end for
+  ds.Close();
+
+  m_iRecordCount=iCount;
+	return true;
+}
+
+bool CChargeType::getRecord(SChargeType &CT)
+{
+  int pstart=0;
+  int pend = m_iRecordCount-1;
+  int pmiddle = (pend+pstart)/2;
+  int plast = 0;
+  int ifind = 0;
+
+  int islarger = 0;
+  int isequal = 0;
+
+  cur_ChargeType = m_ChargeType;
+  iCurChargeType = CT.iChargeType;
+
+  while (pstart <= pend)
+  {
+    if ((isequal==0)&&(pstart == pend))
+      isequal = 1;
+    else if (isequal==1)
+      break;
+      
+    pmiddle = (pend + pstart)/2;
+    if (plast < pmiddle)
+    {
+      cur_ChargeType = cur_ChargeType + (pmiddle - plast);
+    }
+    else if (plast>pmiddle) 
+    {
+      cur_ChargeType = cur_ChargeType - (plast - pmiddle);
+    }
+
+    islarger = compareChargeType(szDebugFlag, cur_ChargeType, CT);
+    if (islarger>0) 
+    {
+      //forward
+      pstart = pmiddle+1;
+      plast  = pmiddle;
+    }
+      else if (islarger<0) 
+      {
+        //backward
+        pend = pmiddle-1;
+        plast  = pmiddle;
+      }
+        else if (islarger==0) 
+        {
+        	//移动到最后一个
+        	ifind = 1;
+          break;
+        } //end else
+      
+    if (ifind == 1)
+      break;
+  }  //end while
+
+  if (ifind==1) 
+  {
+    //write result
+    CT.iColindexFeeA = cur_ChargeType->iColindexFeeA;
+    CT.iColindexFeeB = cur_ChargeType->iColindexFeeB;
+    CT.iColindexFeeAddA = cur_ChargeType->iColindexFeeAddA;
+    CT.iColindexFeeAddB = cur_ChargeType->iColindexFeeAddB;
+    CT.iColindexMeterCount = cur_ChargeType->iColindexMeterCount;
+    CT.iColindexCdrDuration = cur_ChargeType->iColindexCdrDuration;
+    CT.iColindexRateDuration = cur_ChargeType->iColindexRateDuration;
+    CT.iColindexRuleNo = cur_ChargeType->iColindexRuleNo;
+    CT.iColindexRategroupId = cur_ChargeType->iColindexRategroupId;
+    CT.iColindexTariffId = cur_ChargeType->iColindexTariffId;
+    CT.iColindexRepnoA = cur_ChargeType->iColindexRepnoA;
+    CT.iColindexRepnoB = cur_ChargeType->iColindexRepnoB;
+    CT.iColindexCdrCount = cur_ChargeType->iColindexCdrCount;
+    CT.iChargeStyle = cur_ChargeType->iChargeStyle;
+    CT.iColindexRateA = cur_ChargeType->iColindexRateA;
+    CT.iColindexRateB = cur_ChargeType->iColindexRateB;
+    CT.iColindexRateAddA = cur_ChargeType->iColindexRateAddA;
+    CT.iColindexRateAddB = cur_ChargeType->iColindexRateAddB;
+    CT.iColindexRepnoCdrduration = cur_ChargeType->iColindexRepnoCdrduration;
+    CT.iColindexRepnoRateduration = cur_ChargeType->iColindexRepnoRateduration;
+    CT.iColindexRepnoCdrcount = cur_ChargeType->iColindexRepnoCdrcount;        
+    return true;
+  }
+  else 
+  {
+    return false;
+  }
+}
+
+int CChargeType::getCount()
+{
+	return m_iRecordCount;
+}
+
+int CChargeType::compareChargeType(char *szDebugFlag, SChargeType* cur_ChargeType, SChargeType &sChargeType)
+{
+  int iRet;
+  if (sChargeType.iChargeType > cur_ChargeType->iChargeType)
+    iRet = 1;
+  else if (sChargeType.iChargeType < cur_ChargeType->iChargeType)
+    iRet = -1;
+  else
+    iRet = 0;
+
+  return iRet;
+}

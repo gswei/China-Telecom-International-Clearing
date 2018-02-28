@@ -1,0 +1,142 @@
+
+#include "C_BillRate.h"
+#include "CF_CInterpreter.h"
+//#include "CF_COracleDB.h"
+#include "CF_CPluginPacket.h"
+#include "CF_Config.h"
+
+//#include "CF_CPluginengine.h"
+#include "CF_CPlugin.h"
+#include "CF_CMessage.h"
+#include "CF_CMemFileIO.h"
+#include "CF_CFmtChange.h"
+
+#include "psutil.h"
+using namespace std;
+using namespace tpss;
+
+#include <stdio.h>
+#include <iostream.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <signal.h>
+#include <string.h>
+#include <strings.h>
+#include <time.h>
+#include <stdarg.h>
+#include <errno.h>
+
+//CDatabase DBConn;
+CLog theJSLog;
+
+extern SParameter Param;
+
+int main(int argc, char* argv[])
+{
+	theJSLog.setLog("/mboss/home/zhjs/work/vivilog/", 1, "RATE", "LIUW", 101);
+
+	//connectDB("/home/zhjs/env/zhjs.ini", DBConn);
+	//CBindSQL ds(DBConn);
+	//DBConnection conn;
+	//dbConnect(conn);
+	
+	BillRate BillRate;
+	CF_MemFileI _infile;
+	CF_MemFileO _outfile;
+	CFmt_Change _inrcd,_outrcd;
+	MessageParser  pMessage;
+	
+	char szFiletype[10];
+	strcpy(szFiletype,"SJSTD");
+	
+	_infile.Init(szFiletype);
+	_outfile.Init(szFiletype);
+	_inrcd.Init(szFiletype);
+	_outrcd.Init(szFiletype);
+	
+	
+
+
+	try
+	{
+		if(argc == 1)
+		{
+			
+			BillRate.init("MSJYW", "PREP",1);
+			theJSLog <<"Init Success.."<<endi;
+			pMessage.setMessage(MESSAGE_NEW_BATCH, "NOG", "/mboss/home/zhjs/work/viviNOG.0001",1111);
+			BillRate.message(pMessage);
+			theJSLog <<"Batch Success.."<<endi;
+			theJSLog <<"start file.."<<endi;
+			pMessage.setMessage(MESSAGE_NEW_FILE, "NOG", "/mboss/home/zhjs/work/viviNOG.0001",1111);			
+			BillRate.message(pMessage);
+			theJSLog <<"record .."<<endi;
+
+			_infile.Open("/mboss/home/zhjs/work/vivi/NOG.0001");
+			_outfile.Open("/mboss/home/zhjs/work/vivi/NOG.0001.result");	
+			PacketParser ps;
+			ResParser retValue;
+			while( _infile.readRec(_inrcd) != READ_AT_END)
+			{
+				ps.setRcd(_inrcd);
+				_outrcd.Copy_Record(_inrcd);
+				retValue.setRcd(_outrcd);
+				BillRate.execute(ps,retValue);
+				_outfile.writeRec(retValue.m_outRcd);
+				
+			}
+			pMessage.setMessage(MESSAGE_END_FILE, "NOG", "/mboss/home/zhjs/work/vivi/NOG.0001",1111);			
+			BillRate.message(pMessage);
+			theJSLog <<"end file.."<<endi;
+			pMessage.setMessage(MESSAGE_END_BATCH_END_DATA, "GZb01", "/mboss/home/zhjs/work/vivi/NOG.0001",1111);						
+			BillRate.message(pMessage);
+			theJSLog <<"end batch .."<<endi;
+			pMessage.setMessage(MESSAGE_NEW_BATCH, "NOG", "/mboss/home/zhjs/work/vivi/NOG.0001",1111);
+			BillRate.message(pMessage);
+			theJSLog <<"Batch Success.."<<endi;
+			pMessage.setMessage(MESSAGE_END_BATCH_END_DATA, "GZb01", "/mboss/home/zhjs/work/vivi/NOG.0001",1111);						
+			BillRate.message(pMessage);
+			theJSLog <<"end batch .."<<endi;
+				_outfile.Close();
+	_infile.Close();
+						
+		}
+		/*
+		else if(argc == 2 && strcmp(argv[1],"-l")==0)
+		{
+
+				BillRate.init("LIUW", "RATE",1);
+			for(int i=0;i < Param.rule_exact->memManager.pShm->iRuleCount ;i++) 
+				{
+					cout<<"Var.rule"<<(Param.rule_exact->memManager.RealVarShm + i)->szRateRule<<endl;
+					cout<<"Var.szStartTime"<<(Param.rule_exact->memManager.RealVarShm + i)->szStartTime<<endl;
+					cout<<"Var.szEndTime"<<(Param.rule_exact->memManager.RealVarShm + i)->szEndTime<<endl;
+					
+					cout<<"Value.iRuleNo"<<(Param.rule_exact->memManager.RealValueShm + i)->iRuleNo<<endl;
+					cout<<"Value.szRateGroupId"<<(Param.rule_exact->memManager.RealValueShm + i)->szRateGroupId<<endl;
+					cout<<"Value.szUpdateTime"<<(Param.rule_exact->memManager.RealValueShm + i)->szUpdateTime<<endl;										
+				}
+						
+		}
+		else if(argc == 2 && strcmp(argv[1],"-e")==0)
+		{
+
+		}
+		else if(argc == 2 && strcmp(argv[1],"-r")==0)
+		{
+
+		}
+		else if(argc == 3 && strcmp(argv[1],"-a")==0)
+		{
+
+		}
+		
+*/
+	}
+	catch(jsexcp::CException e)
+	{
+		//theJSLog << e.GetErrMessage() <<endw;
+		errLog(LEVEL_ERROR, "a.txt" , errno, "help", __FILE__, __LINE__, e);
+	}
+	return 0;
+}

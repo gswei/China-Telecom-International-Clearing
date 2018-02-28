@@ -1,0 +1,85 @@
+/**
+Copyright (c) 2009-2012 GUANGDONG ESHORE TECHNOLOGY CO., LTD.
+All rights reserved.
+
+Created:     2012-9-8 ÏÂÎç4:02:16
+Module:      ratable_resource_accumulator.h
+Author:      öÄÕ×¾²
+Revision:    $v1.0$
+Description: ¼Æ·ÑÀÛ¼ÆÖµ for RatableResourceAccumulator
+*/
+#ifndef RATABLE_RESOURCE_ACCUMULATOR_H_
+
+#define RATABLE_RESOURCE_ACCUMULATOR_H_
+
+#include "shm_Set.h"
+#include <vector>
+
+
+#define MY_W_LOCK_BEGIN 	\
+    if(mutex_.WLock())\
+    {
+
+#define MY_W_LOCK_END \
+    }\
+    else\
+    {\
+        std::cout<<GetName()<<"»¥³âÊ§°Ü£º "<<mutex_.GetErrorMessage()<<endl;\
+    }\
+    \
+    if(!mutex_.WUnLock())\
+    {\
+        std::cout<<GetName()<<"½âËøÊ§°Ü £º "<<mutex_.GetErrorMessage()<<endl;\
+    }\
+     
+namespace tpss
+{
+struct RatableResourceAccumulatorItem {
+    int 	ratable_resource_id;
+    char 	owner_type[3];
+    Int64	owner_id;
+    int		ratable_cycle_id;
+    int		balance;
+    bool operator < ( const RatableResourceAccumulatorItem& rhs )const {
+        if( ratable_resource_id < rhs.ratable_resource_id ) {
+            return true;
+        }
+
+        if( ratable_resource_id > rhs.ratable_resource_id ) {
+            return false;
+        }
+
+        if( owner_id < rhs.owner_id ) {
+            return true;
+        }
+
+        return false;
+    }
+    std::string& toString( std::string& str )const {
+        return str;
+    }
+};
+
+class CShmRatableResourceAccumulatorMgr
+{
+public:
+    CShmRatableResourceAccumulatorMgr()
+        : datas_( "RatableResourceAccumulator", 0 ), mutex_( "RatableResourceAccumulator" ) {
+
+    }
+    ~CShmRatableResourceAccumulatorMgr();
+    bool Init( bool create_shm = false );
+    bool LoadDataFromDB();
+    std::string GetName()const {
+        return std::string( "RatableResourceAccumulator" );
+    }
+    bool PutData( const std::vector< RatableResourceAccumulatorItem >& vector_ratable_resource_accmulator );
+    bool GetItem( int ratable_resource_id, Int64 owner_id, RatableResourceAccumulatorItem& item );
+private:
+    bool Insert( const RatableResourceAccumulatorItem& item );
+    ns_shm_data::CManagedMutex mutex_;
+    ns_shm_data::T_SHMSET_NO_MUTEX < RatableResourceAccumulatorItem, MAX_PP - 1 >  datas_;
+};
+};
+
+#endif

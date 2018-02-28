@@ -1,0 +1,2305 @@
+/******************************************************************
+	Copyright (c) 2012, GUANGDONG YOSON TECHNOLOGY CO., LTD
+	All rights reserved.
+
+	Created:		2013/2/25
+	Filename: 		FormatPlugin.cpp
+	Description:	结算六期系统的格式化文件类
+					格式化文件，写话单块
+
+	History:
+	<table>
+		Revision	Author			Date		Description
+		--------	------			----		-----------
+		v1.0		hed		 2013/3/22	       完成程序初稿
+		v2.0		hed		 2013/3/31		   将格式化操作放到申请话单块之前执行好
+		v3.0        hed		 2013/4/9		   支持多进程格式化文件
+	</table>
+*******************************************************************/
+/*
+84：当前纪录在文件中的记录序号
+85：文件名上的某个字符串：根据环境变量FMT_TIME_INFNAME截取，原定为文件名上时间字段
+87: 文件名上的某个字符串：根据环境变量FMT_FIELD_INFNAME截取
+88: 话单方向：      （MsgDirection）短信网间结算和短信与cp结算系统有效
+90: 整个输入话单：  （Record）--经压缩为定长32字节；在输出记录格式中存在字段名为Record的字段时有效，（可在source_env表定义该字段组合）
+91: 输入话单长度：  （Record_Len）
+92：异常单类型      (Abn_type)
+94：假子冠话单标志  (Fake_Header_Flag)
+99: 数据源代码      (source_id);
+100:本地网缩写      (localnet_abbr);
+*/
+//时间格式之类的长度不一致。
+
+#include "FormatPlugin.h"
+#define THROW_EXCEPTION(iErrorCode, strErrorMsg) {throw jsexcp::CException( iErrorCode, strErrorMsg, __FILE__, __LINE__); }
+#define MAX_CHLD_PRC_NUM  10
+typedef struct
+{
+	pid_t pid;
+	int m_lPrc_ID;     //增加进程id add by hed 2013-4-9
+	char  state;       // PRCST_STARTING PRCST_IDLE PRCST_BUSY PRCST_STOPPING PRCST_INACTV
+}CHLD_PRC_INFO;
+CHLD_PRC_INFO g_stChldPrcInfo[MAX_CHLD_PRC_NUM];
+queue<int> task;
+
+int  g_iChldPrcNum;
+bool gbNormal=true;
+
+
+//PacketParser pps;			//??为什么放到成员变量就要挂啊
+//ResParser res;
+
+extern char Field[MAX_FIELD_COUNT][FMT_MAX_FIELD_LEN];
+
+FormatPlugin::FormatPlugin()
+{
+	initflag=0;
+	m_bSuspSig=false;
+	childNum = 0;
+
+}
+
+FormatPlugin::~FormatPlugin()
+{
+	m_Shm = NULL; 
+	m_pArgv=NULL;
+	m_pTktBlkBase=NULL;
+	m_DBConn=NULL;
+	pCur_TxtFmtDefine=NULL;
+	pCur_Input2Output=NULL; 
+}
+
+/********格式化插件自带函数*******************************************************/
+void FormatPlugin::execute(PacketParser& ps,ResParser& retValue)
+{
+	char szLogStr[LOG_MSG_LEN+1];							//日志信息
+  	CFmt_Change *inrcd;
+    char szRecord[record_len];
+    memset(szRecord,0,record_len);
+    int iErrorType=0;
+    int iTimeOutType=0;
+    int iRet=0;
+	STxtRecordFmtDefine *pCur_TxtRecFmt=NULL;
+	STxtRecordFmtDefine *pLast_TxtRecFmt=NULL;
+	
+    m_formatcheck.iAnn_Index=0;
+    m_formatcheck.iCalledNo_Index=0;
+    m_formatcheck.iFake_Header_Flag=0;
+    m_formatcheck.szPreCalledNo[0] = 0;
+    m_formatcheck.szAftCalledNo[0] = 0;
+    m_txtformat.iSign2_Begin=0;
+    m_formatcheck.SHQQRcdType=0;
+	m_formatcheck.SHQQCalledNoIdx=0;
+//	cout<<"ps.getRecord():"<<ps.getRecord()<<endl;
+
+	strcpy(szRecord,ps.getString());
+    if(szRecord[strlen(szRecord)-1] == '\n')
+    	szRecord[strlen(szRecord)-1] = 0;
+    iTotalNum++;
+//    cout<<"szRecord:"<<szRecord<<endl;
+
+    sprintf(Field[MAX_FIELD_COUNT-10],"%d",strlen(szRecord));
+    sprintf(Field[MAX_FIELD_COUNT-17],"%d",iTotalNum);
+    sprintf(Field[MAX_FIELD_COUNT-5],"%d",ps.getOffset());
+
+    pCur_TxtRecFmt=m_txtformat.Get_CurTxtRecordFmt(szRecord);
+    if(!pCur_TxtRecFmt)
+    {
+	  SetAbnOutCdr(eFmtOther,iErrorType,inrcd,ps,retValue);
+//写otherformat
+      return ;
+    }
+    //cout<<"iErrorType1："<<iErrorType<<endl;
+
+    pLast_TxtRecFmt=pCur_TxtRecFmt;
+    inrcd=OTxt_Fmt.Get_Fmt(pCur_TxtRecFmt->szRecord_Name);
+
+	pCur_Input2Output=m_txtformat.GetCurInput2Output(inrcd->Get_id(),outrcd.Get_id());
+	if(pCur_Input2Output == NULL)
+	{
+		sprintf(szLogStr, "can't find input:%s ,output:%s in input2output!",inrcd->Get_id(),outrcd.Get_id());
+		//throw CException(ERR_SELECT_NONE,szLogStr, __FILE__, __LINE__);
+		THROW_EXCEPTION(ERR_SELECT_NONE,szLogStr);
+	}
+
+	outrcd.Clear_Field();
+
+    try
+    {
+    //考虑返回字段序号//考虑不校验入口长度
+      iErrorType=inrcd->Set_record(szRecord,pCur_TxtRecFmt->iRecord_Len);
+    }
+    catch(jsexcp::CException e)
+    {
+      iErrorType=-1;
+    }
+   // cout<<"iErrorType2："<<iErrorType<<endl;
+
+/*
+	if(iErrorType) 
+	{
+		SetAbnOutCdr(eFmtErr,iErrorType,inrcd,ps,retValue);
+		return ;
+	}
+*/
+    Get_TxtCalledNo(inrcd);
+//取整张话单，压缩后在转成文本形式存放
+    if(iRecord_Index > 0) 
+    {
+      CF_CHash oHash;
+      if(mCur_SourceCfg->second.FieldIndex[0] == 0)
+        oHash.getHashStr((unsigned char*)Field[MAX_FIELD_COUNT-11], szRecord, strlen(szRecord));
+      else
+      {
+        char szTmpRecord[record_len+1];
+        szTmpRecord[0]=0;
+        int tmpFieldIndex=0;
+        do
+        {
+          if(mCur_SourceCfg->second.FieldIndex[tmpFieldIndex]<80)
+            sprintf(szTmpRecord,"%s%s;",szTmpRecord,inrcd->Get_Field(mCur_SourceCfg->second.FieldIndex[tmpFieldIndex]));
+          else sprintf(szTmpRecord,"%s%s;",szTmpRecord,Field[mCur_SourceCfg->second.FieldIndex[tmpFieldIndex]-1]);
+          tmpFieldIndex++;
+        }while(mCur_SourceCfg->second.FieldIndex[tmpFieldIndex]!=0);
+        oHash.getHashStr((unsigned char*)Field[MAX_FIELD_COUNT-11], szTmpRecord, strlen(szTmpRecord));
+      }
+      char szDulRtn[record_len+1];
+      transfer( Field[MAX_FIELD_COUNT-11],16,szDulRtn);//压缩后固定16个字节
+      sprintf(Field[MAX_FIELD_COUNT-11],"%s",szDulRtn);
+      Field[MAX_FIELD_COUNT-11][32]=0;
+    }
+  
+
+    //***********************************************************
+    // 校验字段
+    //***********************************************************
+  int iInFieldCount=pCur_Input2Output->iCount;
+  int iCheckIndex=0;
+  int iCheckReturn;
+
+  int iIsC = 0;
+  char  DTime[16];
+  memset(DTime,0,16);
+
+  for(int i=0;i<iInFieldCount;i++)
+  {
+      if(pCur_Input2Output->pInputIndex[i]<=0) continue;
+      if(pCur_Input2Output->pInputIndex[i]>=inrcd->Get_fieldcount()) continue;
+  	  char chCheckFmt=inrcd->Get_FieldFmt(pCur_Input2Output->pInputIndex[i]);
+  	  if(chCheckFmt == NONCHECK_STATITC_CH)
+  	  {
+  	    if(strlen(inrcd->Get_Field(pCur_Input2Output->pInputIndex[i]))<16)
+  	    {
+  	      strcpy(DTime,inrcd->Get_Field(pCur_Input2Output->pInputIndex[i]));
+  	      iIsC=1;
+  	    }
+  	  }
+  	  else if(chCheckFmt!=NONCHECK_CH)
+  	  { 
+  	    iCheckReturn=m_formatcheck.CheckField(chCheckFmt,inrcd->Get_Field(pCur_Input2Output->pInputIndex[i]),m_szSourceID,
+  	    	(pCur_Input2Output->pInputIndex[i]-1),inrcd->Get_id(),inrcd->Get_FieldCheckLen(pCur_Input2Output->pInputIndex[i]));
+  	    if(iCheckReturn)
+  	    {
+  	    	if((iCheckReturn==(-2))&&(iTimeOutType==0))
+  	      		iTimeOutType=1;
+  	    	else if((iCheckReturn==(-90))&&(iTimeOutType==0))
+  	           iTimeOutType=90;
+  	    	else if((iCheckReturn==(-9))&&(iTimeOutType==0))
+  	           iTimeOutType=9;
+  	    	else iErrorType=pCur_Input2Output->pInputIndex[i];
+	      //跳出
+
+  	    }
+  	    if(((chCheckFmt==CTIMECHECK_CH)||(chCheckFmt==cTIMECHECK_CH))&&(!iCheckReturn))
+  	    {
+  	      strcpy(DTime,inrcd->Get_Field(pCur_Input2Output->pInputIndex[i]));
+  	      iIsC=1;
+  	    }
+  	    if(!iIsC)
+  	    {
+  	      if((chCheckFmt==ZDATECHECK_CH)&&(!iCheckReturn))
+  	      {
+  	        strncpy(DTime,inrcd->Get_Field(pCur_Input2Output->pInputIndex[i]),8);
+  	        DTime[14]=0;
+  	      }
+  	      if((chCheckFmt==zTIMECHECK_CH)&&(!iCheckReturn))
+  	      {
+  	        strcpy(DTime+8,inrcd->Get_Field(pCur_Input2Output->pInputIndex[i]));
+  	        DTime[14]=0;
+  	      }
+  	      if((chCheckFmt==sTIMECHECK_CH)&&(!iCheckReturn))
+  	      {
+  	        strcpy(DTime,inrcd->Get_Field(pCur_Input2Output->pInputIndex[i]));
+  	        DTime[14]=0;
+  	      }
+  	    }
+
+      }
+  	}
+/*
+	if(iErrorType) SetAbnOutCdr(eFmtErr,iErrorType,inrcd,ps,retValue);
+	else SetAbnOutCdr(eFmtTimeOut,iErrorType,inrcd,ps,retValue);
+	return;
+*/
+    //cout<<"iErrorType3："<<iErrorType<<endl;
+    //***********************************************************
+    // 在这里添加代码对话单进行处理并置iResult的值
+    //***********************************************************
+    if(pCur_TxtRecFmt->szExpression[0]!='@')
+    {
+      int i=0;
+      for(i=0;i<iComp_Exp_Num;i++)
+      {
+        if(!strcmp(oComp_Exp[i].Get_FileFmt(),inrcd->Get_id()))
+        	break;
+      }
+      if(i == iComp_Exp_Num)
+      {
+        Comp_Exp Tmp_Obj_Comp;
+        oComp_Exp.push_back(Tmp_Obj_Comp);
+        oComp_Exp[iComp_Exp_Num].AddVariable(*inrcd);
+        oComp_Exp[iComp_Exp_Num].Set_FileFmt(inrcd->Get_id());
+        iComp_Exp_Num++;
+      }
+      for(int j=0;j<pCur_TxtRecFmt->szExp_Num;j++)
+      {
+        if(oComp_Exp[i].Comp_Expression(pCur_TxtRecFmt->szExp[j]))
+        {
+          iErrorType=inrcd->Get_fieldcount()+1;
+/*          
+		  SetAbnOutCdr(eFmtErr,iErrorType,inrcd,ps,retValue);
+          return ;
+*/
+        }
+      }
+    }
+    //
+    sprintf(Field[MAX_FIELD_COUNT-7],"%d",m_formatcheck.iFake_Header_Flag);
+    sprintf(Field[MAX_FIELD_COUNT-9],"%d",iTimeOutType);
+    //
+    Route_Change(pCur_TxtFmtDefine,inrcd);
+
+	m_txtformat.SHQQRcdType = m_formatcheck.SHQQRcdType;
+	m_txtformat.SHQQCalledNoIdx = m_formatcheck.SHQQCalledNoIdx;
+
+    iRet=m_txtformat.Set_OutRcd(*inrcd,outrcd);
+    if(iRet) iErrorType = iRet;
+    //cout<<"iErrorType4："<<iErrorType<<endl;
+    if(iErrorType)
+	{ 
+		SetAbnOutCdr(eFmtErr,iErrorType,inrcd,ps,retValue);
+      	return ;
+    }
+    else
+    {
+    	if(iTimeOutType)
+    	{
+    		SetAbnOutCdr(eFmtTimeOut,iErrorType,inrcd,ps,retValue);
+    		return ;
+    	}
+    }
+    //cout<<"iErrorType5："<<iErrorType<<endl;
+    
+    if(iOraRcdIdx>0) outrcd.Set_Field(iOraRcdIdx,szRecord);
+
+	if(m_chIs_Ann == 'Y')
+	{
+   		if(!m_formatcheck.Check_Ann_Flag(outrcd)) sprintf(Field[MAX_FIELD_COUNT-8],"%d",1);
+   		else sprintf(Field[MAX_FIELD_COUNT-8],"%d",0);
+	}
+
+
+    if(mCur_SourceCfg->second.chIs_Bill_Statics_Route == 'Y')
+    {
+      char InRoute[16];
+      char OutRoute[16];
+      outrcd.Get_Field(INROUTE_NAME,InRoute);
+      outrcd.Get_Field(OUTROUTE_NAME,OutRoute);
+      if(!m_txtformat.CheckBillSFC(*inrcd))
+        Bill_Route.AddItem(DTime,InRoute,OutRoute);
+    }
+    if(mCur_SourceCfg->second.chIs_Bill_Statics_fnTime == 'Y')
+    {
+      if(!m_txtformat.CheckBillSFC(*inrcd))
+        Bill_fnTime.AddItem(Field[MAX_FIELD_COUNT-16]);
+    }
+    if(!m_txtformat.CheckBillSFC(*inrcd))
+      Bill.AddItem(DTime);
+    if(strcmp(szEarliestTime,DTime) > 0) sprintf(szEarliestTime,"%s",DTime);
+    if(strcmp(szLatestTime,DTime) < 0) sprintf(szLatestTime,"%s",DTime);
+
+//	retValue.setAnaResult(eNormal,"","");
+//	cout<<"retValue.m_outRcd.Get_id():"<<retValue.m_outRcd.Get_id()<<"|outrcd.Get_id():"<<outrcd.Get_id()<<endl;
+    //cout<<"到尾部喽：outrcd = "<<outrcd.Get_record()<<endl;
+	retValue.m_outRcd.Copy_Record(outrcd);
+	return ;
+
+}
+
+int FormatPlugin::InsTimeBetweenFile(char *SourceId,char *filename,char *EarlyTime,char *LastTime)
+{
+  CBindSQL ds(*m_DBConn);
+  char szSqlStr[400];
+  sprintf(szSqlStr,"insert into D_BILLTIME_BETWEEN_FILE(Source_Id, FileName, EarlyTime, LastTime) values('%s', '%s', '%s', '%s')",SourceId, filename,EarlyTime,LastTime);
+  ds.Open(szSqlStr, NONSELECT_DML);
+  ds.Execute();
+  ds.Close();
+  return 0;
+}
+
+void FormatPlugin::Build_trans_table()
+{
+    int i, j;
+    for (i = 0; i < 16; i++)
+        for (j = 0; j < 16; j++)
+        {
+            if (i < 10 && j < 10)
+            {
+                trans_table[i*16 + j][0] = 0x30 + i;
+                trans_tablex[i*16 + j][0] = 0x30 + i;
+                trans_table[i*16 + j][1] = 0x30 + j;
+                trans_tablex[i*16 + j][1] = 0x30 + j;
+            }
+            else
+            {
+                /*trans_table[i*16+j][0]  = 0x20;大于等于10的数值均置为空格*/
+                trans_table[i*16 + j][0] = 0x41 + i - 10; /*updated on 2001.3.23, 更改后BCD与16进制编码相同*/
+                if (i >= 10)
+                    trans_tablex[i*16 + j][0] = 0x41 + i - 10;
+                else
+                {
+                    trans_table[i*16 + j][0] = 0x30 + i;
+                    trans_tablex[i*16 + j][0] = 0x30 + i;
+                }
+                /*trans_table[i*16+j][0]  = 0x20;大于等于10的数值均置为空格*/
+                trans_table[i*16 + j][1] = 0x41 + j - 10; /*updated on 2001.3.23, 更改后BCD与16进制编码相同*/
+                if (j >= 10)
+                    trans_tablex[i*16 + j][1] = 0x41 + j - 10;
+                else
+                {
+                    trans_table[i*16 + j][1] = 0x30 + j;
+                    trans_tablex[i*16 + j][1] = 0x30 + j;
+                }
+            }
+        } /*end for i,j*/
+}
+
+int FormatPlugin::transfer( char *block_buff, int len,char *szRtn,int flag )
+{
+    int i, start_pos = 0;
+	if(flag)
+	{
+   	 	for (i = 0;i < len;i++)
+   	 	{
+        	szRtn[i*2] = trans_table[block_buff[start_pos] & 0x00ff][0]; /*translate the high 4 bits*/
+        	szRtn[i*2 + 1] = trans_table[block_buff[start_pos] & 0x00ff][1]; /*low 4 bits*/
+        	start_pos++;
+  	  	}
+	}
+	else
+	{
+    	for (i = 0;i < len;i++)
+    	{
+        	szRtn[i*2] = trans_tablex[block_buff[start_pos] & 0x00ff][0]; /*translate the high 4 bits*/
+        	szRtn[i*2 + 1] = trans_tablex[block_buff[start_pos] & 0x00ff][1]; /*low 4 bits*/
+        	start_pos++;
+    	}
+	}
+	szRtn[2*i] = 0;
+
+    return 0;
+}
+void FormatPlugin::Route_Change(STxtFileFmtDefine *pTmp,CFmt_Change *inrcd)
+{
+  if(m_formatcheck.iCheckRouteIndex<0) return;
+  for(int i=0;i<pTmp->iRoute_Num;i++)
+  {
+    if((!strcmp(inrcd->Get_Field(m_formatcheck.iCheckRouteIndex+1),pTmp->pCheckRoute[i].szRoute))
+  	  &&(!strncmp(m_formatcheck.szTmpCalledNo,pTmp->pCheckRoute[i].szCalledNo_Header,strlen(pTmp->pCheckRoute[i].szCalledNo_Header))))
+    {
+      sprintf(inrcd->Get_Field(m_formatcheck.iCheckRouteIndex+1),"%s",pTmp->pCheckRoute[i].szOutputRoute);
+      return ;
+    }
+  }
+
+  return ;
+}
+void FormatPlugin::Get_TxtCalledNo(CFmt_Change *inrcd)
+{
+
+ if(m_txtformat.iSign2_Begin==0) return ;
+ if((m_txtformat.iSign2_Value ) == 12)
+   sprintf(m_formatcheck.szPreCalledNo,"40513A");
+ else if((m_txtformat.iSign2_Value ) == 11)
+ {
+ 	  sprintf(m_formatcheck.szPreCalledNo,"A");
+ 	  sprintf(m_formatcheck.szAftCalledNo,"%s",inrcd->Get_Field(m_txtformat.iSign2_Begin) + m_txtformat.iSign2_Len);
+ }
+ else if((m_txtformat.iSign2_Value==1402)||(m_txtformat.iSign2_Value==1404)||(m_txtformat.iSign2_Value==2402)||(m_txtformat.iSign2_Value==2404))
+ {
+   sprintf(m_formatcheck.szPreCalledNo,"%s",inrcd->Get_Field(m_txtformat.iSign2_Begin) + m_txtformat.iSign2_Len);
+ }
+  return ;
+}
+
+int FormatPlugin::GetStrFromFN(char *Res,char *Fn,char Spl,int Index,int Begin,int Len)
+{
+  int s1,s2;
+//  char TmpFn[254];
+//  TmpFn[0]=0;
+
+  if(Index<1) return -1;
+  
+  if(Index == 1)
+  {
+    s1 = -1;
+  }
+  else 
+  {
+    s1 = strncspn(Fn,Spl,Index-1);
+    if(s1<0) return -1;
+  }
+  s2 = strncspn(Fn,Spl,Index);
+  if(s2<0) s2 = strlen(Fn);
+
+  if(Begin >= (s2-s1)) return -2;
+
+  strncpy(Res,Fn+s1+1,(s2-s1-1));
+  Res[s2-s1-1] = 0;
+
+  if(Begin<1) return -2;
+  sprintf(Res,"%s",Res+Begin-1);
+  if(Len<1) return -3;
+
+  Res[Len]=0;
+  return 0;
+}
+
+int FormatPlugin::getFromSrcEnv( char *Value, char *Name, char *SourceId,char *szService)
+{
+	CBindSQL ds( *m_DBConn );
+	ds.Open("select VAR_VALUE from C_SOURCE_ENV where VARNAME=:a and source_id=:b and SERVICE=:c", SELECT_QUERY );
+ 	ds<<Name<<SourceId<<szService;
+ 	if( !(ds>>Value) ) 
+ 	{   
+ 		ds.Close();
+		ds.Open("select VAR_VALUE from C_PROCESS_ENV where VARNAME=:a and source_group=:b and SERVICE=:c", SELECT_QUERY );
+ 		ds<<Name<<m_szSrcGrpID<<szService;
+		if( !(ds>>Value) )
+		{
+ 			ds.Close();
+			ds.Open("select VARVALUE from C_GLOBAL_ENV where VARNAME=:a", SELECT_QUERY );
+ 			ds<<Name;
+			if( !(ds>>Value) )
+			{
+				ds.Close();
+				return -1;
+			}
+		}
+ 	}
+	ds.Close();
+	delSpace(Value,0);	
+	return 0;
+}/*end of getFromSrcEnv*/
+
+/**
+ *根据数据源组从C_SOURCE_GROUP_DEFINE 找文件类型FILETYPE_ID，
+ *根据FILETYPE_ID从表c_filetype_define找出记录类型record_type，记录长度record_len，
+ *根据FILETYPE_ID从c_txtfile_fmt找出记录格式的全部信息
+ *在根据FILETYPE_ID从表C_SOURCE_GROUP_CONFIG找数据源ID数目
+ *根据数据源ID从表C_FILE_RECEIVE_ENV找到过滤规则
+ *数据源信息全部放到了Map中变量m_SourceCfg
+ *CFmt_Change类变量outrcd也存储了关于许多文件记录类型格式字段等信息
+ */
+void FormatPlugin::LoadSourceCfg()
+{
+	CBindSQL ds(*m_DBConn);
+	char szSqlStr[400];
+	int iSourceCount=0;
+
+//生成线表TP_BILLING_LINE中通过数据源组SOURCE_GROUP去表C_SOURCE_GROUP_DEFINE中找到文件类型FILETYPE_ID
+//作为格式化输出类型 add by hed  2013-03-11
+	//int flow_id = getFlowID();
+	//ds.Open("select b.filetype_id from TP_BILLING_LINE  a,C_SOURCE_GROUP_DEFINE b where a.billing_line_id = :1 and a.source_group = b.source_group ")
+	//ds<<flow_id;
+	//ds.close();
+
+//sourceGrp
+    ds.Open("select FILETYPE_ID from C_SOURCE_GROUP_DEFINE where SOURCE_GROUP=:1", SELECT_QUERY);
+    ds<<m_szSrcGrpID;
+    ds>>m_szOutTypeId;
+    ds.Close();
+   	expTrace(szDebugFlag, __FILE__, __LINE__,"%s;%s",m_szSrcGrpID,m_szOutTypeId);
+
+	outrcd.Init(m_szOutTypeId,ds); 
+ 	iRecord_Index = outrcd.Get_FieldIndex(RECORD_NAME);
+  	iOraRcdIdx = outrcd.Get_FieldIndex(ORARECORD_NAME);
+//source
+    ds.Open("select count(*) from C_SOURCE_GROUP_CONFIG where SOURCE_GROUP=:1", SELECT_QUERY);
+    ds<<m_szSrcGrpID;
+    ds>>iSourceCount;
+    ds.Close();
+    
+    expTrace(szDebugFlag, __FILE__, __LINE__, 
+      "iSourceCount=%d;", iSourceCount);
+    
+    ds.Open("select a.source_id,b.file_fmt,b.source_path,b.TOLLCODE from C_SOURCE_GROUP_CONFIG a,I_SOURCE_DEFINE b where SOURCE_GROUP=:1 and a.source_id=b.source_id", SELECT_QUERY );
+    ds<<m_szSrcGrpID;
+    for (int i=0; i<iSourceCount; i++)
+    {
+	  SOURCECFG SourceCfg;
+	  string strSourceId;
+      char TmpVarValue[101];
+      ds>>SourceCfg.szSourceId>>SourceCfg.szInFileFmt>>SourceCfg.szSourcePath>>SourceCfg.szTollCode;
+      
+      strSourceId=SourceCfg.szSourceId;
+      
+	  if(getSourceFilter(SourceCfg.szSourceId,SourceCfg.filterRule) == 0)
+	  {
+			cout<<"数据源："<<strSourceId<<" 没有配置过滤规则！"<<endl;
+			exit(-1);
+
+	  }
+      if(getFromSrcEnv( TmpVarValue, "DUL_KEYWORDS",SourceCfg.szSourceId,m_szService))
+      {
+        SourceCfg.FieldIndex[0]=0;
+      }
+      else
+      {
+
+        char *ss0,*ss1;
+        int j = 0; ss0 = TmpVarValue;
+		ss1 = strtok(ss0, ";");
+		while(ss1 != NULL)
+		{
+			SourceCfg.FieldIndex[j]=atoi(ss1);
+			j++;
+			if(j>19)
+			{
+            	expTrace(szDebugFlag, __FILE__, __LINE__,"DUL_KEYWORDS field define in source_env is more than 19");
+            	//退出
+		  	}
+		  ss1 = strtok(NULL, ";");
+		}
+      }
+
+//FMT_TIME_FMT/FMT_ZDATE_FMT/FMT_zTIME_FMT
+      if(getFromSrcEnv( TmpVarValue, "FMT_TIME_FMT",SourceCfg.szSourceId,m_szService))
+      {
+        strcpy(SourceCfg.Fmt_Time_fmt,"YYYYDDMMhhmmss");
+      }
+      else
+      {
+        strcpy(SourceCfg.Fmt_Time_fmt,TmpVarValue);
+      }
+      if(getFromSrcEnv( TmpVarValue, "FMT_ZDATE_FMT",SourceCfg.szSourceId,m_szService))
+      {
+        strcpy(SourceCfg.szZDate_Fmt,"YYYYDDMM");
+      }
+      else
+      {
+        strcpy(SourceCfg.szZDate_Fmt,TmpVarValue);
+      }
+      if(getFromSrcEnv( TmpVarValue, "FMT_zTIME_FMT",SourceCfg.szSourceId,m_szService))
+      {
+        strcpy(SourceCfg.szzTime_Fmt,"hhmmss");
+      }
+      else
+      {
+        strcpy(SourceCfg.szzTime_Fmt,TmpVarValue);
+      }
+
+	  if(getFromSrcEnv( TmpVarValue, "MSGDIRECTION_BEGIN",SourceCfg.szSourceId,m_szService))
+      {
+        SourceCfg.iMsgDirBegin=-1;
+      }
+      else
+      {
+        SourceCfg.iMsgDirBegin=atoi(TmpVarValue);
+      }
+
+//从文件名上取字段
+	  if(getFromSrcEnv( TmpVarValue, "FMT_FIELD_INFNAME",SourceCfg.szSourceId,m_szService))
+	  {
+    	  SourceCfg.FnSep= '.';
+    	  SourceCfg.FnIndex = -1;
+     	  SourceCfg.FnBegin = -1;
+     	  SourceCfg.FnLen = -1;
+ 	  }
+	  else
+	  {
+
+	    char TmpFn[10];
+	    int Fns1,Fns2;
+	    Fns1 = strncspn(TmpVarValue,';',1);
+	    if(Fns1 <= 0) SourceCfg.FnSep= '.';
+	    else SourceCfg.FnSep= TmpVarValue[0];
+	//找第二个分隔符
+	    Fns2 = strncspn(TmpVarValue,';',2);
+	    if(Fns2<0)
+	    {
+	      if(Fns1<0) SourceCfg.FnIndex = -1;
+	      else
+	      {
+	        SourceCfg.FnIndex = atoi(TmpVarValue+Fns1+1);
+	      }
+	      SourceCfg.FnBegin = -1;
+	      SourceCfg.FnLen = -1;
+	    }
+	    else
+	    {
+	      strncpy(TmpFn,TmpVarValue+Fns1+1,Fns2-Fns1-1);
+	      TmpFn[Fns2-Fns1-1] = 0;
+	      SourceCfg.FnIndex = atoi(TmpFn);
+	//找第三个分隔符
+	      Fns1 = strncspn(TmpVarValue,';',3);
+	      if(Fns1 < 0)
+	      {
+	        SourceCfg.FnBegin = atoi(TmpVarValue+Fns2+1);
+	        SourceCfg.FnLen = -1;
+	      }
+	      else
+	      {
+	        strncpy(TmpFn,TmpVarValue+Fns2+1,Fns1-Fns2-1);
+	        TmpFn[Fns1-Fns2-1] = 0;
+	        SourceCfg.FnBegin = atoi(TmpFn);
+	        SourceCfg.FnLen = atoi(TmpVarValue+Fns1+1);
+	      }
+	    }
+	  }
+
+//20071026,取文件名上的时间,作为话务量统计用
+
+//从文件名上取字段
+	  if(getFromSrcEnv( TmpVarValue, "FMT_TIME_INFNAME",SourceCfg.szSourceId,m_szService))
+	  {
+	      SourceCfg.FntSep= '.';
+	      SourceCfg.FntIndex = -1;
+	      SourceCfg.FntBegin = -1;
+	      SourceCfg.FntLen = -1;
+	  }
+	  else
+	  {
+	    char TmpFn[10];
+	    int Fns1,Fns2;
+	    Fns1 = strncspn(TmpVarValue,';',1);
+	    if(Fns1 <= 0) SourceCfg.FntSep= '.';
+	    else SourceCfg.FntSep= TmpVarValue[0];
+	//找第二个分隔符
+	    Fns2 = strncspn(TmpVarValue,';',2);
+	    if(Fns2<0)
+	    {
+	      if(Fns1<0) SourceCfg.FntIndex = -1;
+	      else
+	      {
+	        SourceCfg.FntIndex = atoi(TmpVarValue+Fns1+1);
+	      }
+	      SourceCfg.FntBegin = -1;
+	      SourceCfg.FntLen = -1;
+	    }
+	    else
+	    {
+	      strncpy(TmpFn,TmpVarValue+Fns1+1,Fns2-Fns1-1);
+	      TmpFn[Fns2-Fns1-1] = 0;
+	      SourceCfg.FntIndex = atoi(TmpFn);
+	//找第三个分隔符
+	      Fns1 = strncspn(TmpVarValue,';',3);
+	      if(Fns1 < 0)
+	      {
+	        SourceCfg.FntBegin = atoi(TmpVarValue+Fns2+1);
+	        SourceCfg.FntLen = -1;
+	      }
+	      else
+	      {
+	        strncpy(TmpFn,TmpVarValue+Fns2+1,Fns1-Fns2-1);
+	        TmpFn[Fns1-Fns2-1] = 0;
+	        SourceCfg.FntBegin = atoi(TmpFn);
+	        SourceCfg.FntLen = atoi(TmpVarValue+Fns1+1);
+	      }
+	    }
+	  }
+
+//bill_stat
+	  if(getFromSrcEnv( TmpVarValue, "IS_BILL_STATICS",SourceCfg.szSourceId,m_szService))
+	  {
+		SourceCfg.chIs_Bill_Statics='N';
+	  }
+	  SourceCfg.chIs_Bill_Statics=TmpVarValue[0];
+
+	  if(getFromSrcEnv( TmpVarValue, "IS_BILL_STATICS_ROUTE",SourceCfg.szSourceId,m_szService))
+	  {
+	    expTrace(szDebugFlag, __FILE__, __LINE__,
+	      "set IS_BILL_STATICS_ROUTE = 'N' !");
+	  	SourceCfg.chIs_Bill_Statics_Route = 'N';
+	  }
+	  else SourceCfg.chIs_Bill_Statics_Route=TmpVarValue[0];
+
+	  if(getFromSrcEnv( TmpVarValue, "IS_BILL_STATICS_FNTIME",SourceCfg.szSourceId,m_szService))
+	  {
+	    expTrace(szDebugFlag, __FILE__, __LINE__,
+	      "set IS_BILL_STATICS_FNTIME = 'N' !");
+	  	SourceCfg.chIs_Bill_Statics_fnTime = 'N';
+	  }
+	  else SourceCfg.chIs_Bill_Statics_fnTime=TmpVarValue[0];
+
+	  if(getFromSrcEnv( TmpVarValue, "IS_STAT_TIMEBETWEENFILE",SourceCfg.szSourceId,m_szService))
+	  {
+	    expTrace(szDebugFlag, __FILE__, __LINE__,
+	      "set IS_STAT_TIMEBETWEENFILE = 'N' !");
+	  	SourceCfg.chIs_TimeFile = 'N';
+	  }
+	  else SourceCfg.chIs_TimeFile=TmpVarValue[0];
+
+
+//回流
+	  if(getFromSrcEnv( TmpVarValue, "REDO_PROPERTY_BEGIN",SourceCfg.szSourceId,m_szService))
+	  	Redo_Begin = 0;
+	  else Redo_Begin = atoi(TmpVarValue);
+
+	  if(getFromSrcEnv( Redo_What, "REDO_PROPERTY_BEGIN",SourceCfg.szSourceId,m_szService))
+	  {
+	  	Redo_What[0] = '#';
+	  	Redo_What[1] = 0;
+	  }
+
+	  if(getFromSrcEnv( TmpVarValue, "RCD_ARR_DUR",SourceCfg.szSourceId,m_szService))
+	  {
+	  	expTrace(szDebugFlag, __FILE__, __LINE__,
+	      "set RCD_ARR_DUR =-1 !");
+	  	SourceCfg.iRcd_Arr_Dur = -1;
+	  }
+	  else SourceCfg.iRcd_Arr_Dur = atoi(TmpVarValue);
+	  if(getFromSrcEnv( TmpVarValue, "EAR_RCD_ARR_DUR",SourceCfg.szSourceId,m_szService))
+	  {
+	    expTrace(szDebugFlag, __FILE__, __LINE__,
+	      "set EAR_RCD_ARR_DUR =-1 !");
+	  	SourceCfg.iERcd_Arr_Dur = -1;
+	  }
+	  else SourceCfg.iERcd_Arr_Dur = atoi(TmpVarValue);
+
+	  if(getFromSrcEnv( TmpVarValue, "FMT_ANN_DIR",SourceCfg.szSourceId,m_szService))
+	      sprintf(TmpVarValue,"N");
+
+	  if(strlen(TmpVarValue) < 2) m_chIs_Ann='N';
+	  else m_chIs_Ann='Y';
+	  if(TmpVarValue[strlen(TmpVarValue)-1] != '/')
+	    strcat(TmpVarValue, "/");
+	  sprintf(szAnn_Dir,"%s",TmpVarValue);
+
+      m_SourceCfg[strSourceId]=SourceCfg;
+    }
+    ds.Close();
+
+}
+/******根据数据源获取过滤规则 0没有查到规则，1查到规则了*********************/
+int FormatPlugin::getSourceFilter(char* source,char* filter)
+{	
+	CBindSQL ds( *m_DBConn );
+	try
+	{
+		ds.Open("select file_filter from C_FILE_RECEIVE_ENV where source_id = :1");
+		ds<<source;
+		if(!(ds>>filter))
+		{
+			ds.Close();
+			return 0;
+		}
+		ds.Close();
+	}catch(jsexcp::CException e){
+				cout<<"数据库查询异常"<<endl;
+				return false ;
+			}
+	
+	return 1;
+}
+
+int FormatPlugin::SetAbnOutCdr(pluginAnaResult anaType,int iErrorType,CFmt_Change *inrcd,PacketParser& ps,ResParser& retValue)
+{
+	char szErrorCode1[32];
+	char szErrorCode2[32];
+	
+	sprintf(szErrorCode2,"%s_%d",inrcd->Get_id(),iErrorType);
+	if(iErrorType<=0)
+		sprintf(szErrorCode1,"%s_%d",outrcd.Get_id(),iErrorType);
+	else
+	{
+		int i =0;
+		while(i<pCur_Input2Output->iCount)
+		{
+			if(pCur_Input2Output->pInputIndex[i] == iErrorType)
+			{
+				sprintf(szErrorCode1,"%s_%d",outrcd.Get_id(),pCur_Input2Output->pOutputIndex[i]);
+				break;
+			}
+			i++;
+		}
+	}
+	retValue.setAnaResult(anaType,szErrorCode1,szErrorCode2);
+//	retValue.setAnaResult(anaType,iErrorType,szErrorCode2);
+//	cout<<"ps.m_inRcd.Get_id():"<<retValue.m_outRcd.Get_id()<<"|outrcd.Get_id():"<<outrcd.Get_id()<<endl;
+    ps.m_inRcd.Copy_Record(outrcd);	
+    /*
+	switch(anaType)
+	{
+		case 1:
+			retValue.setAnaResult(anaType,szErrorCode1,szErrorCode2);
+			break;
+		case 2:
+			retValue.setAnaResult(anaType,szErrorCode1,szErrorCode2);
+		    ps.m_inRcd.Copy_Record(outrcd);
+			break;
+		case 3:
+			retValue.setAnaResult(anaType,szErrorCode1,szErrorCode2);
+		    ps.m_inRcd.Copy_Record(outrcd);
+		    break;
+		default:
+			break;
+	}
+	*/
+	return 0;
+}
+
+void FormatPlugin::init(char *szSourceGroupID,char *szService,int index)
+{
+
+	szDebugFlag[0]='N';
+	m_chBillSta_Filter_Cond='Y';
+	szDebugFlag[1]=0;
+	m_DBConn=&DBConn;
+//	m_Logger=m_log;
+	strcpy(m_szSrcGrpID,szSourceGroupID);
+	strcpy(m_szService,szService);
+	iProcIndex = index;
+	Build_trans_table();
+	LoadSourceCfg();
+	if(m_txtformat.LoadFmtDataToMem(m_DBConn,szDebugFlag,m_szOutTypeId,m_chBillSta_Filter_Cond,m_szSrcGrpID))
+		//throw jsexcp::CException(ERR_SELECT_NONE,"Load Fmt Data To memory err!", __FILE__, __LINE__);
+			THROW_EXCEPTION(ERR_SELECT_NONE,"Load Fmt Data To memory err!");
+	if(m_formatcheck.LoadCheckDataToMem(m_DBConn,m_szSrcGrpID,szDebugFlag,m_chIs_Ann))
+		//throw jsexcp::CException(ERR_SELECT_NONE,"Load Check Data To memory err!", __FILE__, __LINE__);
+			THROW_EXCEPTION(ERR_SELECT_NONE,"Load Check Data To memory err!");
+
+	initflag=1;
+}
+
+void FormatPlugin::message(MessageParser&  pMessage)
+{
+	char szLogStr[400];
+	switch(pMessage.getMessageType())
+	{
+		case MESSAGE_NEW_BATCH:
+			szLastAnn_Dir[0]=0;
+			szLastAnn_Abbr[0]=0;
+			break;
+		case MESSAGE_END_BATCH_END_FILES:
+			if(m_formatcheck.CommitAnnFile())
+            {
+				m_formatcheck.RollbackAnnFile();
+	            expTrace(szDebugFlag,__FILE__, __LINE__, 
+	              	  "rename Ann err!");
+				//throw jsexcp::CException(ERR_ANNFILE,"COMMIT ANN err!", __FILE__, __LINE__);
+				THROW_EXCEPTION(ERR_ANNFILE,"COMMIT ANN err!");
+            }			
+			break;
+		case MESSAGE_END_BATCH_END_DATA:
+			break;
+		case MESSAGE_BREAK_BATCH:
+			m_formatcheck.RollbackAnnFile();
+			break;
+		case MESSAGE_PROGRAM_QUIT:
+			break;
+		case MESSAGE_NEW_FILE:
+			iTotalNum = 0;
+			iRightNum = 0;
+			iLackNum = 0;
+			iErrorNum = 0;
+			iPickNum = 0;
+			iOtherNum = 0;
+			strcpy(m_szSourceID,pMessage.getSourceId());
+		    sprintf(Field[MAX_FIELD_COUNT-2],"%s",m_szSourceID);
+			strcpy(m_szFileName,pMessage.getFileName());
+			mCur_SourceCfg=m_SourceCfg.find((string)m_szSourceID);
+			if(mCur_SourceCfg == m_SourceCfg.end())
+			{
+		      	sprintf(szLogStr, "can't find source_id:%s in source_group:%s!",m_szSourceID,m_szSrcGrpID);
+				//throw jsexcp::CException(ERR_SELECT_NONE,szLogStr, __FILE__, __LINE__);
+				THROW_EXCEPTION(ERR_SELECT_NONE,szLogStr);
+			}
+			DEBUG_LOG<<"FormatPlugin-m_szSourceID:"<<m_szSourceID<<endd;
+			iErrorBack_Flag=0;
+	        strcpy((mCur_SourceCfg->second).szFile_Fmt,(mCur_SourceCfg->second).szInFileFmt);
+	        DEBUG_LOG<<"FormatPlugin-szInFileFmt:"<<(mCur_SourceCfg->second).szInFileFmt<<endd;
+			DEBUG_LOG<<"FormatPlugin-szFile_Fmt:"<<(mCur_SourceCfg->second).szFile_Fmt<<endd;
+
+	        if((Redo_Begin>0)&&(Redo_What[0] != '#'))
+	        if(!strncmp( m_szFileName+Redo_Begin-1,Redo_What,strlen(Redo_What)))
+	  	  	{
+	  	  	  iErrorBack_Flag=1;
+	  	  	  DEBUG_LOG<<"FormatPlugin-Redo_Begin:"<<Redo_Begin<<endd;
+	  	  	  DEBUG_LOG<<"FormatPlugin-Redo_What:"<<Redo_What<<endd;
+	  	  	  DEBUG_LOG<<"FormatPlugin-m_szOutTypeId:"<<m_szOutTypeId<<endd;
+	  	  	  strcpy((mCur_SourceCfg->second).szFile_Fmt,m_szOutTypeId);
+	  	  	}
+		//加MsgDirection
+			if((mCur_SourceCfg->second).iMsgDirBegin > 0)
+		  	{
+			    char *s1,*s2;
+			    s1 = m_szFileName+(mCur_SourceCfg->second).iMsgDirBegin;
+			    if((s2 = strchr(s1,'.')) == NULL)
+			    {
+			      sprintf(szLogStr,"get MsgDirection Err in filename:%s;offset:%d.",m_szFileName,(mCur_SourceCfg->second).iMsgDirBegin);
+			      //throw jsexcp::CException(ERR_GET_MsgDirection,szLogStr,__FILE__,__LINE__);
+				  THROW_EXCEPTION(ERR_GET_MsgDirection,szLogStr);
+			    }
+			    *s2 = 0;
+			    sprintf(Field[MAX_FIELD_COUNT-13],"%s",s1);
+			    *s2 = '.';
+			}
+			//加从文件名上取得字段
+			if((mCur_SourceCfg->second).FnIndex > 0)
+			{
+			    GetStrFromFN(Field[MAX_FIELD_COUNT-14],m_szFileName,(mCur_SourceCfg->second).FnSep,
+			    	(mCur_SourceCfg->second).FnIndex,(mCur_SourceCfg->second).FnBegin,(mCur_SourceCfg->second).FnLen);
+			}
+			if((mCur_SourceCfg->second).FntIndex > 0)
+			{
+			    GetStrFromFN(Field[MAX_FIELD_COUNT-16],m_szFileName,(mCur_SourceCfg->second).FntSep,
+			    	(mCur_SourceCfg->second).FntIndex,(mCur_SourceCfg->second).FntBegin,(mCur_SourceCfg->second).FntLen);
+			}
+			if(m_chIs_Ann == 'Y')
+			{
+				   char szAnnDir[256];
+				   sprintf(szAnnDir,"%s%s",(mCur_SourceCfg->second).szSourcePath,szAnn_Dir);
+				   chkDir(szAnnDir);
+				   if(strcmp(szAnnDir,szLastAnn_Dir)||strcmp((mCur_SourceCfg->second).szTollCode,szLastAnn_Abbr))
+				   {
+				   		strcpy(szLastAnn_Dir,szAnnDir);
+				   		strcpy(szLastAnn_Abbr,(mCur_SourceCfg->second).szTollCode);
+				  		m_formatcheck.CommitAnnFile();
+				  		m_formatcheck.Init_Ann_Dir(szAnnDir,(mCur_SourceCfg->second).szTollCode,iProcIndex);
+				   }
+			}
+			
+			DEBUG_LOG<<"FormatPlugin-szFile_Fmt:"<<(mCur_SourceCfg->second).szFile_Fmt<<endd;
+			  
+			pCur_TxtFmtDefine=m_txtformat.Get_CurTxtFileFmt((mCur_SourceCfg->second).szFile_Fmt);
+			if(!pCur_TxtFmtDefine)
+			{
+			    sprintf(szLogStr,"can not find TxtFile_Fmt: %s !",(mCur_SourceCfg->second).szFile_Fmt);
+			    //throw jsexcp::CException(ERR_FILEFMT,szLogStr,__FILE__,__LINE__);
+				THROW_EXCEPTION(ERR_FILEFMT,szLogStr);
+			}
+			Bill_Route.Init(m_szSourceID,iProcIndex);
+			Bill_fnTime.Init(m_szSourceID,iProcIndex);
+			Bill.Init(m_szSourceID,iProcIndex);
+			  
+			strcpy(m_formatcheck.szTime_Fmt,(mCur_SourceCfg->second).Fmt_Time_fmt);
+			m_formatcheck.iTime_FmtLen=strlen(m_formatcheck.szTime_Fmt);
+			strcpy(m_formatcheck.szzTime_Fmt,(mCur_SourceCfg->second).szzTime_Fmt);
+			m_formatcheck.izTime_FmtLen=strlen(m_formatcheck.szzTime_Fmt);
+			strcpy(m_formatcheck.szZDate_Fmt,(mCur_SourceCfg->second).szzTime_Fmt);
+			m_formatcheck.iZDate_FmtLen=strlen(m_formatcheck.szZDate_Fmt);
+			m_formatcheck.iRcd_Arr_Dur =(mCur_SourceCfg->second).iRcd_Arr_Dur;
+			m_formatcheck.iERcd_Arr_Dur =(mCur_SourceCfg->second).iERcd_Arr_Dur;
+ 			memset(szEarliestTime,'9',14);
+  			memset(szLatestTime,'0',14);
+  			sprintf(Field[MAX_FIELD_COUNT-4],"%ld",pMessage.getFileId());
+			break;
+		case MESSAGE_END_FILE:
+
+			  if(mCur_SourceCfg->second.chIs_Bill_Statics == 'Y')
+			  if(Bill.UpdateDB(szLogStr,*m_DBConn))
+			  {
+			    //throw jsexcp::CException(ERR_UPDATE_STATICS,"update BILL_STATICS ERR",__FILE__,__LINE__);
+				THROW_EXCEPTION(ERR_UPDATE_STATICS,"update BILL_STATICS ERR");
+			  }
+
+			  if(mCur_SourceCfg->second.chIs_Bill_Statics_fnTime == 'Y')
+			  if(Bill_fnTime.UpdateDB(szLogStr,*m_DBConn))
+			  {
+			    //throw jsexcp::CException(ERR_UPDATE_STATICS,"update BILL_STATICS_ROUTE_FNTIME ERR",__FILE__,__LINE__);
+				THROW_EXCEPTION(ERR_UPDATE_STATICS,"update BILL_STATICS_ROUTE_FNTIME ERR");
+			  }
+			  if(mCur_SourceCfg->second.chIs_Bill_Statics_Route == 'Y')
+			  if(Bill_Route.UpdateDB(szLogStr,*m_DBConn))
+			  {
+			    //throw jsexcp::CException(ERR_UPDATE_STATICS,"update BILL_STATICS_ROUTE ERR",__FILE__,__LINE__);
+				THROW_EXCEPTION(ERR_UPDATE_STATICS,"update BILL_STATICS_ROUTE ERR");
+			  }
+			if(mCur_SourceCfg->second.chIs_TimeFile == 'Y')
+			    InsTimeBetweenFile(m_szSourceID,m_szFileName,szEarliestTime,szLatestTime);
+			break;
+		default:
+			break;
+	}
+
+
+}
+
+void expTrace(const char *szDebugFlag, const char *szFileName,
+  int lineno, const char *msg, ...)
+{
+  va_list argp;
+  char ss0[1024];
+  char *ss1, *ss2;
+  char *spara;
+  int ipara;
+  char sline[6];
+  char cur_time[15];
+
+  strncpy(ss0, msg, 1024);
+  ss0[1023]='\0';
+  ss1=ss0;
+  sprintf(sline, "%05d", lineno);
+//  getCurTime(cur_time);
+//  cout<<"["<<cur_time<<"] ";
+  //cout<<szFileName<<":"<<sline<<":"<<endl;
+  //cout<<szFileName<<":"<<sline<<":";
+  va_start( argp, msg );
+  while (( ss2 = strchr( ss1, '%') ) != NULL) {
+    *ss2 = 0;
+    theLog<<ss1;
+    switch (ss2[1])
+    {
+      case 'd':
+        ipara=va_arg(argp, int);
+        theLog<<ipara;
+        ss1=ss2+2;
+        break;
+      case 's':
+        spara=va_arg(argp, char *);
+        theLog<<spara;
+        ss1=ss2+2;
+        break;
+      default:
+        theLog<<"%";
+        ss1=ss2+1;
+        break;
+    }
+  }
+
+  va_end( argp );
+  theLog<<ss1;
+  theLog<<endi;
+  
+  return;
+}
+
+/*************Bill_Process函数***********************************************************/
+void ChldExitPrc(int sig_type)
+{
+	cout<<"父进程收到子进程的结束信号了:"<<sig_type<<endl;
+	pid_t pid;
+	while(1)
+	{
+		pid=waitpid(-1,0,WNOHANG);
+		cout<<"等待子进程结束了吗:"<<pid<<":"<<endl;
+		if(pid<=0) break;
+		for(int i=0; i<MAX_CHLD_PRC_NUM; i++)
+		{
+			if(pid==g_stChldPrcInfo[i].pid)
+			{
+				if(g_stChldPrcInfo[i].state==PRCST_STOPPING)
+					cerr<<"子进程"<<i+1<<"退出"<<endl;
+				else if(g_stChldPrcInfo[i].state==PRCST_STARTING)
+				{
+					g_stChldPrcInfo[i].state=PRCST_INACTV;
+					break;
+				}
+				else
+				{
+					cerr<<"子进程"<<i+1<<"异常退出"<<endl;
+					gbNormal=false;
+				}
+				g_stChldPrcInfo[i].pid=0;
+				g_stChldPrcInfo[i].m_lPrc_ID=0;
+				g_stChldPrcInfo[i].state=PRCST_INACTV;
+				g_iChldPrcNum--;
+				break;
+			}
+		}
+	}
+}
+
+int FormatPlugin::getTicketLength()
+{
+	return m_iTicketLength;
+}
+
+int FormatPlugin::getBlockSize()
+{
+	return m_iTicketLength*(m_iTicketNum+1);
+}
+
+int FormatPlugin::getChldPrcNum()
+{
+	return g_iChldPrcNum;
+}
+
+bool FormatPlugin::init(int argc, char *argv[])
+{
+	cerr<<"正在进行模板初始化...\n";
+
+	m_iMainPid=getpid();
+
+	//cout<<"record.size():"<<m_record.size()<<":"<<m_record.empty()<<"::"<<mmm.size()<<endl;
+
+	if( !PS_Process::init(argc, argv) ) return false;
+	
+	m_pArgv=argv;
+	
+	char sParamName[256];
+	CString sKeyVal;
+
+	//该类进程的初始化
+	if( getFlowID() > 0 )
+	{
+		int shm_key;
+		sprintf(sParamName, "memory.AT_BILLING_LINE_%d.ipc_key_value", getFlowID());
+		if( param_cfg.bGetMem(sParamName, sKeyVal) && sKeyVal.isNumber() )
+		{
+			shm_key=sKeyVal.toInteger();
+		}
+		else
+		{
+			cerr<<"未配置生产线"<<getFlowID()<<"的任务数据区共享内存键值\n";
+			return false;
+		}
+
+		sprintf(sParamName, "billing_line.%d.record_size", getFlowID());
+		if( param_cfg.bGetMem(sParamName, sKeyVal) && sKeyVal.isNumber() )
+		{
+			m_iTicketLength=sKeyVal.toInteger();
+		}
+		else
+		{
+			cerr<<"未配置生产线"<<getFlowID()<<"的任务数据区的单条任务长度\n";
+			return false;
+		}
+
+		sprintf(sParamName, "billing_line.%d.record_num", getFlowID());
+		if( param_cfg.bGetMem(sParamName, sKeyVal) && sKeyVal.isNumber() )
+		{
+			m_iTicketNum=sKeyVal.toInteger();
+		}
+		else
+		{
+			cerr<<"未配置生产线"<<getFlowID()<<"的任务数据区每个块的任务数\n";
+			return false;
+		}
+
+		//add by hed  2013-04-09
+		sprintf(sParamName, "business.format.process_num");
+		if( param_cfg.bGetMem(sParamName, sKeyVal) && sKeyVal.isNumber() )
+		{
+			childNum=sKeyVal.toInteger();
+		}else{
+			cerr<<"未配置格式化模块的子进程个数"<<endl;
+			return false ;
+		}
+
+
+		m_Shm=new ShareMemory(shm_key);
+		if( !m_Shm->open() )
+		{
+			cerr<<"连接任务数据共享内存失败！\n";
+			return false;
+		}
+		m_pTktBlkBase=(char *)m_Shm->addr();
+	}
+
+	int chldprc_evtchnl_key;
+	if( param_cfg.bGetMem("memory.MT_DSPCH_CHILD.msgq_key_value", sKeyVal) && sKeyVal.isNumber() )
+	{
+		chldprc_evtchnl_key=sKeyVal.toInteger();
+	}
+	else
+	{
+		cerr<<"未配置父子进程间消息通道键值\n";
+		return false;
+	}
+
+	m_iChldPrcMsgID=msgget(chldprc_evtchnl_key, 0600);
+	if(m_iChldPrcMsgID<0)
+	{
+		cerr<<"连接父子进程通信通道失败！\n";
+		return false;
+	}
+
+	cerr<<"正在进行进程初始化...\n";
+
+	if( !onInit() )
+	{
+		prcExit();
+		return false;
+	}
+	
+	int ret=1;
+	int event_sn, event_type;
+	long param1, param2, src_id;
+	while(ret)	//清空子进程消息队列
+	{
+		ret=getChldEvt(event_sn, event_type, param1, param2, src_id, false);
+		if(ret<0)
+		{
+			cerr<<"清空子进程消息队列失败!\n";
+			return false;
+		}
+	}
+	
+	PS_Process::setSignalPrc();
+
+	g_iChldPrcNum=0;
+	memset(&g_stChldPrcInfo, 0, sizeof(g_stChldPrcInfo));
+
+	struct sigaction siginfo;
+	siginfo.sa_handler=ChldExitPrc;
+	sigemptyset(&siginfo.sa_mask);
+	siginfo.sa_flags=0;
+	sigaction(SIGCHLD,&siginfo,0);
+
+/*********获取格式化插件初始化所需要的数据源组,service*** 2013-03-11 add by hed*********************************************/
+	int flow_id = getFlowID();
+	int module_id = getModuleID();
+	char sourceGroup[8],service[8];
+	CBindSQL ds(DBConn);
+	try{
+		ds.Open("select source_group from TP_BILLING_LINE  where billing_line_id = :1",SELECT_QUERY);
+		ds<<flow_id;
+		ds>>sourceGroup;
+		ds.Close();
+		if(!strcmp(sourceGroup,""))
+		{
+			cout<<"sourceGroup不能为空"<<endl;
+			return false ;
+		}
+		
+		ds.Open("select ext_param from TP_PROCESS where billing_line_id = :1 and module_id = :2",SELECT_QUERY);
+		ds<<flow_id<<module_id;
+		ds>>service;
+		ds.Close();		
+		if(!strcmp(service,""))
+		{
+			cout<<"service没有配置"<<endl;
+			return false ;
+		}
+
+		char sql[1024];
+		ds.Open("select c.input_path from C_SOURCE_GROUP_DEFINE a,C_SERVICE_FLOW b,C_SERVICE_INTERFACE c where a.source_group=:1 " 
+                    "and a.workflow_id = b.workflow_id and b.service=:2 and b.input_id = c.interface_id ",SELECT_QUERY);	
+		ds<<sourceGroup<<service;
+		ds>>input_path;
+		ds.Close();
+		if(!strcmp(input_path,""))
+		{
+			cout<<"格式化输入文件相对路径input_path没有配置"<<endl;
+			return false ;
+		}
+
+		ds.Open("select var_value from c_process_env where varname = 'FMT_ERR_DIR' and source_group=:1 and service=:2 ",SELECT_QUERY);
+		ds<<sourceGroup<<service;
+		ds>>erro_path;
+		ds.Close();
+		if(!strcmp(erro_path,""))
+		{
+			cout<<"格式化错误文件路径erro_path没有在c_process_env中配置"<<endl;
+			return false ;
+		}
+		
+		ds.Open("select var_value from c_process_env where varname = 'FMT_TIMEOUT_DIR' and source_group=:1 and service=:2 ",SELECT_QUERY);
+		ds<<sourceGroup<<service;
+		ds>>timeout_path;
+		ds.Close();
+		if(!strcmp(timeout_path,""))
+		{
+			cout<<"格式化超时文件路径timeout_path没有在c_process_env中配置"<<endl;
+			return false ;
+		}
+
+		ds.Open("select var_value from c_process_env where varname = 'FMT_OTHER_DIR' and source_group=:1 and service=:2 ",SELECT_QUERY);
+		ds<<sourceGroup<<service;
+		ds>>other_path;
+		ds.Close();
+		if(!strcmp(other_path,""))
+		{
+			cout<<"格式化未定义格式话单文件路径otherformat没有在c_process_env中配置"<<endl;
+			return false ;
+		}
+		
+		cout<<"数据源组："<<sourceGroup<<"    service:"<<service<<"相对路径："<<input_path<<"错误文件路径: "<<erro_path<<" 超时文件路径："<<timeout_path<<" 格式化未定义话单文件路径："<<other_path<<endl;
+
+		}catch(jsexcp::CException e){
+
+				cout<<"数据库查询异常"<<endl;
+				return false ;
+			}
+	
+	/* 初始化日志 */
+	CReadIni IniFile;
+	char* m_szEnvFile = "/mboss/home/zhjs/etc/zhjs/zhjs.ini" ;	
+	if(!IniFile.init(m_szEnvFile))
+	{
+		cout<<"打开INI文件出错： "<<m_szEnvFile<<endl;
+		return false;
+	}
+	char szLogPath[PATH_NAME_LEN+1];
+	char szLogLevel[10];
+	IniFile.GetValue("COMMON", "LOG_PATH", szLogPath, 'N');
+	IniFile.GetValue("COMMON", "LOG_LEVEL", szLogLevel, 'N');
+	//theLog.setLog(szLogPath, atoi(szLogLevel), Param.szServiceId, Param.szSourceGroupId, Param.iProcessId);
+	theLog.setLog(szLogPath, atoi(szLogLevel),service , sourceGroup, 1);
+	
+	/*调用格式化插件的初始化函数*/
+	init( sourceGroup,service,1);  
+	
+	DIR *dirptr = NULL; 
+	char input_dir[1024],erro_dir[1024],timeout_dir[1024],other_dir[1024];
+	int rett = -1;
+
+	//获取错误话单文件路径
+	for(map<string,SOURCECFG>::const_iterator iter = m_SourceCfg.begin();iter !=m_SourceCfg.end(); ++iter)
+	{		   		
+			memset(input_dir,0,sizeof(input_dir));
+			strcpy(input_dir,iter->second.szSourcePath);
+			if (input_dir[strlen(input_dir) - 1] != '/')
+			{
+					strcat(input_dir, "/");
+			}
+			strcat(input_dir,input_path);
+			if((dirptr=opendir(input_dir)) == NULL)
+			{
+					cout<<"数据源【"<<iter->first<<"】的输入文件路径: "<<input_dir<<"不存在!!!"<<endl;
+					return false ;
+			}else closedir(dirptr);
+	
+			memset(erro_dir,0,sizeof(erro_dir));
+			strcpy(erro_dir,iter->second.szSourcePath);
+			if (erro_dir[strlen(erro_dir) - 1] != '/')
+			{
+					strcat(erro_dir, "/");
+			}
+			if (erro_path[strlen(erro_path) - 1] != '/')
+			{
+					strcat(erro_path, "/");
+			}
+
+			strcat(erro_dir,erro_path);
+			//struct stat fileStat; if ((stat(dir.c_str(), &fileStat) == 0) && S_ISDIR(fileStat.st_mode))
+			if((dirptr=opendir(erro_dir)) == NULL)
+			{
+					cout<<"数据源【"<<iter->first<<"】的错误文件路径: "<<erro_dir<<"不存在，自行创建"<<endl;
+					rett = mkdir(erro_dir,0755);
+					if(rett == -1)
+					{
+						cout<<"无法创建错误话单目录！！！"<<endl;
+						return false;
+					}
+			}else closedir(dirptr);
+			
+			memset(timeout_dir,0,sizeof(timeout_dir));
+			strcpy(timeout_dir,iter->second.szSourcePath);
+			if (timeout_dir[strlen(timeout_dir) - 1] != '/')
+			{
+					strcat(timeout_dir, "/");
+			}
+			if (timeout_path[strlen(timeout_path) - 1] != '/')
+			{
+					strcat(timeout_path, "/");
+			}
+			strcat(timeout_dir,timeout_path);
+			if((dirptr=opendir(timeout_dir)) == NULL)
+			{
+					cout<<"数据源【"<<iter->first<<"】的超时文件路径: "<<timeout_dir<<"不存在，自行创建"<<endl;
+					rett = mkdir(timeout_dir,0755);
+					if(rett == -1)
+					{
+						cout<<"无法创建超时话单目录！！！"<<endl;
+						return false;
+					}
+			
+			}else  closedir(dirptr);
+			
+			memset(other_dir,0,sizeof(other_dir));
+			strcpy(other_dir,iter->second.szSourcePath);
+			if (other_dir[strlen(other_dir) - 1] != '/')
+			{
+					strcat(other_dir, "/");
+			}
+			if (other_path[strlen(other_path) - 1] != '/')
+			{
+					strcat(other_path, "/");
+			}
+			strcat(other_dir,other_path);
+			if((dirptr=opendir(other_dir)) == NULL)
+			{
+					cout<<"数据源【"<<iter->first<<"】的未定义格式话单文件路径: "<<other_dir<<"不存在，自行创建"<<endl;
+					rett = mkdir(other_dir,0755);
+					if(rett == -1)
+					{
+						cout<<"无法创建未定义格式话单目录！！！"<<endl;
+						return false;
+					}		
+
+			}else  closedir(dirptr);
+
+	}
+
+	//vector<string>  tt;
+	//cout<<"record.size():"<<m_record.size()<<":"<<m_record.empty()<<"::"<<mmm.size()<<"::"<<tt.size()<<endl;
+	//mmm.push_back("1111");
+	//tt.push_back("1111");
+	//cout<<"mmm.size():"<<mmm.size()<<"tt.size()"<<tt.size()<<endl;
+
+	cerr<<"初始化完毕！\n";
+
+	return true;
+}
+
+void FormatPlugin::prcExit()   //子进程退出，有可能不是父进程发送消息叫他退出，也可能是因为自己因为某些条件而被迫退出
+{
+	if( getpid()==m_iMainPid )
+	{
+		//if(m_bHLLCtrl )  //有待改进
+		//{
+			for(int i=0; i<MAX_CHLD_PRC_NUM; i++)
+			{
+				if(g_stChldPrcInfo[i].pid>0)
+				{
+					g_stChldPrcInfo[i].state=PRCST_STOPPING;
+					cerr<<"通知子进程"<<i+1<<"退出"<<m_lPrc_ID+i+1<<endl;
+					putChldEvt(0, EVT_REQ_STOP, 0, 0, m_lPrc_ID+i+1);
+				}
+			}
+			while(true)
+			{
+				if( g_iChldPrcNum<=0 ) break;
+				usleep(30000);
+			}
+		//}
+		cerr<<"正在做退出前的处理...\n";
+		onExit();
+		cerr<<"退出前处理完毕！\n";
+		cerr<<"正在退出...\n";
+	}
+	else onChildExit();
+
+	PS_Process::prcExit();
+}
+
+//向父子进程通信消息队列里提取消息，父子进程均可调用
+int FormatPlugin::getChldEvt(int &event_sn, int &event_type, long &param1, long &param2, long &src_id, bool sync)
+{
+	if(m_iChldPrcMsgID==-1) return -1;
+	EVENT_MSG event_msg;
+	while(true)
+	{
+		if( msgrcv(m_iChldPrcMsgID, &event_msg, sizeof(EVENT), m_lPrc_ID, sync?0:IPC_NOWAIT)<0 )
+		{
+			if(errno==ENOMSG) return 0;
+			else if(errno==EINTR)
+			{
+				if( getpid()==m_iMainPid ) return 0;
+				else continue;
+			}
+			else return -1;
+		}
+		else break;
+	}
+	event_sn=event_msg.event.event_sn;
+	event_type=event_msg.event.event_type;
+	param1=event_msg.event.param1;
+	param2=event_msg.event.param2;
+	src_id=event_msg.event.src_id;
+	return 1;
+}
+
+//向父子进程通信消息队列里发送消息，父子进程均可调用
+bool FormatPlugin::putChldEvt(int event_sn, int event_type, long param1, long param2, long dest_id)
+{
+	if(m_iChldPrcMsgID==-1) return false;
+	EVENT_MSG event_msg;
+	event_msg.msgtype=dest_id;
+	event_msg.event.event_sn=event_sn;
+	event_msg.event.event_type=event_type;
+	event_msg.event.param1=param1;
+	event_msg.event.param2=param2;
+	event_msg.event.src_id=m_lPrc_ID;
+	time(&(event_msg.event.event_time));
+	if( msgsnd(m_iChldPrcMsgID, &event_msg, sizeof(EVENT), IPC_NOWAIT)<0 ) return false;
+	return true;
+}
+
+int FormatPlugin::forwd2Child(int event_sn, int event_type, long param1, long param2, long src_id)
+{
+	if( event_type == EVT_RESP_TASK || event_type == EVT_REQ_STOP )
+	{
+		cerr<<"事件类型不正确！\n";
+		return 0;
+	}
+	if(g_iChldPrcNum==0)
+	{
+		cerr<<"没有子进程\n";
+		return 0;
+	}
+
+	for(int i=0; i<MAX_CHLD_PRC_NUM; i++)
+	{
+		if( g_stChldPrcInfo[i].pid>0 && g_stChldPrcInfo[i].state!=PRCST_INACTV )
+		{
+			if( !putChldEvt(event_sn, event_type, param1, param2, m_lPrc_ID+i+1) )
+			{
+				cerr<<"给子进程"<<i+1<<"发送事件失败!"<<endl;
+				return -1;
+			}
+		}
+	}
+
+	return 1;
+}
+
+//子进程负责扫描数据源目录，格式化等
+void FormatPlugin::childRun(int chld_prc_idx)
+{
+	int event_sn, event_type;
+	long param1, param2, src_id;
+	
+	m_lPrc_ID=m_lPrc_ID+chld_prc_idx+1;
+	int ret;
+	int deal_flag = 0;  //格式化处理正确标志
+
+	char *p=m_pArgv[0]+strlen(m_pArgv[0]);
+	sprintf(p, "(%d) -f%d", chld_prc_idx+1, getFlowID());
+	m_pArgv[1]=NULL;
+
+	m_bReg=false;
+
+	//cout<<"record.size():"<<m_record.size()<<":"<<m_record.empty()<<endl;
+
+	if( !onChildInit() )
+	{
+		cerr<<"子进程"<<chld_prc_idx+1<<"初始化失败！"<<endl;
+		exit(0);
+	}
+
+	do	//清空子进程消息队列
+	{
+		ret=getChldEvt(event_sn, event_type, param1, param2, src_id, false);
+		if(ret<0)
+		{
+			cerr<<"子进程"<<chld_prc_idx+1<<"清空子进程消息队列失败!\n";
+			return;
+		}
+	}while(ret);
+
+	cout<<"[子进程"<<chld_prc_idx+1<<"发送消息给父进程表示进程注册成功]";
+	if( !putChldEvt(0, EVT_RESP_START, m_lPrc_ID, getpid(), m_lPrc_ID-chld_prc_idx-1) ) return;
+
+	/**************************扫描数据源，读取话单文件*************************************/
+	int counter = 0;
+	char dir[1024],erro_dir[1024],timeout_dir[1024],other_dir[1024],sz_errmsg[1024],fileName[1024],filter[256],szFiletypeIn[10];
+	CF_CFscan scan;
+	char szBuff[1012];
+	char *task_addr;  //任务地址
+
+	while(true)
+	{
+		   ret=getChldEvt(event_sn, event_type, param1, param2, src_id,false);
+		   if(ret<0)
+		   {
+			//cerr<<chld_prc_idx+1<<"子进程"<<chld_prc_idx+1<<"获取主进程事件失败！"<<endl;
+			//perror("失败原因");
+			break;
+			//continue;
+		   }
+		
+		   else if(event_type==EVT_REQ_STOP)  
+	       {		
+				cout<<"a主进程要求子进程"<<chld_prc_idx+1<<"退出!!!"<<endl;
+				return ;			//主进程要求子进程退出
+		   }	
+			
+			//cout<<"读取文件:"<<fileName<<" 输入格式为:"<<szFiletypeIn<<" 输出格式:"<<m_szOutTypeId<<endl;		
+				
+			memset(dir,0,sizeof(dir));
+			strcpy(dir,it->second.szSourcePath);  //绝对路径
+			if (dir[strlen(dir) - 1] != '/')
+			{
+				strcat(dir, "/");
+			}
+			strcat(dir,input_path);               //相对路径
+
+			memset(filter,0,sizeof(filter));
+			memset(szFiletypeIn,0,sizeof(szFiletypeIn));  
+			strcpy(filter,it->second.filterRule);		  //过滤条件
+			strcpy(szFiletypeIn,it->second.szInFileFmt);  //当前数据源的输入格式
+			//cout<<"数据源ID:"<<it->first<<"过滤器："<<it->second.filterRule<<"目录为："<<dir<<endl;	
+					
+			
+			//打开话单文件目录
+			if(scan.openDir(dir))
+			{
+				sprintf(sz_errmsg,"打开话单文件目录(%s)失败\n",dir);
+				cout<<sz_errmsg<<endl;
+				//errLog(4,"",FILEREC_ERR_SCAN_RECDIR,sz_errmsg,__FILE__,__LINE__);
+				return ;	
+			}		
+						
+			//循环读取目录，扫描文件夹，获取文件
+			int rett = -1 ;
+			counter = 0;
+			while(1)  //循环读取目录下面的所有文件
+			{	
+			    ret=getChldEvt(event_sn, event_type, param1, param2, src_id,false);
+		        if(ret<0)
+		        {
+					break;
+		        }
+		
+			    else if(event_type==EVT_REQ_STOP)  
+			    {		
+					cout<<"b主进程要求子进程"<<chld_prc_idx+1<<"退出!!!"<<endl;
+					return ;			//主进程要求子进程退出
+				}	
+
+				memset(fileName,0,sizeof(fileName));
+				rett = scan.getFile(filter,fileName);  				
+				if(rett == 100)
+				{		
+						cout<<"【"<<chld_prc_idx+1<<"】"<<"此时文件目录下面没有文件，扫描下个数据源"<<endl;
+						break ;   //此时文件目录下面没有文件，扫描下个数据源
+				}
+				if(rett == -1)
+				{
+					//cout<<chld_prc_idx+1<<"获取文件信息失败"<<endl;
+					continue;    //表示获取文件信息失败，有可能是其他进程改了该文件信息
+				}
+
+				counter++;  //扫描一次文件计数器+1				
+				if(counter > 20)
+				{
+					//cout<<"扫描20次后，跳到下个数据源"<<endl;
+					break;
+				}
+
+				//cout<<chld_prc_idx+1<<"counter= "<<counter<<":"<<fileName<<":"<<rett<<endl;
+				//sleep(1);
+				//string fileN(fileName);				
+
+			    /*过滤文件*.tmp,*TMP,~* */			
+				char* p = strrchr(fileName,'/');
+				char tmp[512];
+				memset(tmp,0,sizeof(tmp));
+				strcpy(tmp,p+1);
+				//cout<<"文件名："<<tmp<<endl;
+				if(tmp[0] == '~' ) continue;
+				if(strlen(tmp) > 2)
+				{		
+						int pos = strlen(tmp)-3;
+						//cout<<"后缀名为："<<tmp+pos<<endl;
+						if((strcmp(tmp+pos,"tmp") && strcmp(tmp+pos,"TMP")) == 0) 
+						{
+							//cout<<"扫描到临时文件，舍弃"<<fileName<<endl;
+							//scan.closeDir();
+							continue;
+						}
+				}				
+				cout<<chld_prc_idx+1<<"扫描到文件："<<fileName<<endl;
+				
+				strcpy(file_name,fileName);  //复制文件名				
+				memset(tmp,0,sizeof(tmp));
+				strcpy(tmp,fileName);
+				strcat(tmp,".tmp");
+				if(rename(fileName,tmp) != 0) //文件改名，避免其他子进程去处理
+				{
+						cout<<chld_prc_idx+1<<"文件改名失败!"<<fileName<<endl;
+						continue ;
+				}		
+				
+				//--------------------------------------------------------------------
+				//发送消息，处理新文件
+				MessageParser  pMessage; 
+				pMessage.setMessage(MESSAGE_NEW_BATCH, it->first.c_str(), fileName,1111);
+				message(pMessage);
+				pMessage.setMessage(MESSAGE_NEW_FILE, it->first.c_str(), fileName,1111);			
+				message(pMessage);
+
+				try
+				{		
+					CF_MemFileI _infile;
+					_infile.Init(szFiletypeIn); //输入格式			
+					_infile.Open(tmp);
+			
+					pps->clearAll();
+					res->clearAll();		
+								    
+					memset(szBuff, 0, 1012 );      //将数据清空	
+					//record.clear();
+					//int iPos = -1;
+					//cout<<"record.size():"<<m_record.size()<<":"<<m_record.empty()<<endl;
+					
+				    //循环扫描文件记录
+				    while(1)  
+				    {		
+					    deal_flag = 0;  //默认文件处理结果为正常的
+
+						pps->clear();
+						res->clear();
+
+						int iPos = _infile.GetPos();
+						pps->setOffset(iPos);
+
+						if( _infile.readRec(szBuff, MAX_LINE_LENGTH) == READ_AT_END )
+						{	
+							break;									
+						}
+
+						//cout<<"输入话单："<<szBuff<<"-----------"<<" 长度："<<strlen(szBuff)<<endl;
+						pps->setRecord(szBuff);	
+						pps->setRcd(outrcd);
+						res->setRcd(outrcd);
+						res->resetAnaResult();
+					
+						execute(*pps,*res);
+
+						if(res->getAnaType() != eNormal) 
+						{		
+							cout<<"格式化记录出错单！"<<fileName<<"		状态："<<res->getAnaType()<<endl;
+							//fileRecord.erase(fileN);   //格式化失败，则删除整个文件的记录
+							//deal_flag = 1;
+							//break;
+							//continue ;
+						}
+																						
+						switch(res->getAnaType())   //根据格式后的类型判断记录的处理方式
+						{
+							case eNormal:			//正常
+								 //cout<<"正常"<<endl;
+								 break;
+
+							case eLackInfo:         //无资料，走无资料接口
+								 
+								 break;
+							case eAbnormal:			//异常，走无资料接口
+								 break;
+							case eRepeat:			//去重用重单
+								 break;
+							case eClassifiable:		//分拣用分拣单标识
+								 break;
+
+							case eFmtErr:			//格式化错单
+								 cout<<"格式化错单"<<endl;
+								 memset(erro_dir,0,sizeof(erro_dir));
+								 strcpy(erro_dir,it->second.szSourcePath);
+								 if (erro_dir[strlen(erro_dir) - 1] != '/')
+								 {
+									strcat(erro_dir, "/");
+								 }
+								 strcat(erro_dir,erro_path);
+								 rename(tmp,strcat(erro_dir,strrchr(fileName,'/')+1)); //将该错误文件移动到错误目录下
+								 deal_flag = 1;
+								 break;
+
+							case eFmtTimeOut:		//格式化超时单，入timeout文件
+								 cout<<"格式化超时单"<<endl;
+								 memset(timeout_dir,0,sizeof(timeout_dir));
+								 strcpy(timeout_dir,it->second.szSourcePath);
+								 if (timeout_dir[strlen(timeout_dir) - 1] != '/')
+								 {
+									strcat(timeout_dir, "/");
+								 }
+								 strcat(timeout_dir,timeout_path);
+								 rename(tmp,strcat(timeout_dir,strrchr(fileName,'/')+1)); 
+								 deal_flag = 1;
+								 break;
+
+							case eFmtOther:			//格式化未定义格式话单，入otherformat文件
+								 cout<<"未定义的格式化单"<<endl;
+								 memset(other_dir,0,sizeof(other_dir));
+								 strcpy(other_dir,it->second.szSourcePath);
+								 if (other_dir[strlen(other_dir) - 1] != '/')
+								 {
+									strcat(other_dir, "/");
+								 }
+								 strcat(other_dir,other_path);
+								 rename(tmp,strcat(other_dir,strrchr(fileName,'/')+1)); 
+								 deal_flag = 1 ;
+								 break;
+
+							case eRollback:			//处理错误，需要回滚
+								 cout<<"处理错误需要回滚"<<endl;
+								 break;
+
+							default :
+
+								break;
+
+						}
+
+						if(deal_flag == 1) break;  //有一条记录出错则整个文件不要
+
+						PkgFmt fmt ;
+						strcpy(fmt.status,"Y");
+						strcpy(fmt.type,"R");
+						strcpy(fmt.code,"18922155159");
+						strcpy(szBuff,res->m_outRcd.Get_record());
+						strcpy(fmt.record,szBuff);
+						//cout<<"格式化成功！输出的话单记录："<<szBuff<<" 记录长度为"<<strlen(szBuff)<<":"<<m_record.size()+1<<":"<<m_record.empty()<<endl;
+
+						m_record.push_back(fmt); //存储记录
+					    //cout<<"到这儿了吗----------------------------"<<endl;
+
+						//记录数已写满私有话单块，此时通知父进程申请话单块，并处理记录
+						if(m_record.size() >= m_iTicketNum)  
+						{
+							cout<<"记录写满私有内存块，请求父进程申请话单块来处理"<<endl;
+							putChldEvt(0, EVT_REQ_TASK, m_lPrc_ID, getpid(), m_lPrc_ID-chld_prc_idx-1);
+							while (1)
+							{
+								int ret=getChldEvt(event_sn, event_type, param1, param2, src_id);
+								if(ret<0)
+								{
+									cerr<<"子进程"<<chld_prc_idx+1<<"获取主进程事件失败！"<<endl;
+									perror("失败原因");
+									return ;
+								}
+								if(event_type==EVT_RESP_TASK)	//获得话单任务,处理话单块
+								{
+									task_addr=(char *)m_pTktBlkBase+(param2*m_iTicketLength*(m_iTicketNum+1));
+									ret = onTask(task_addr,chld_prc_idx+1,0);
+									cout<<chld_prc_idx+1<<"子进程处理完成，发送信号给父进程表示任务结束"<<endl;
+									putChldEvt(event_sn, EVT_RPT_TASKEND, m_lPrc_ID, getpid(), m_lPrc_ID-chld_prc_idx-1);
+									break;
+								
+								}
+								else if(event_type==EVT_REQ_STOP)  
+								{		
+									cout<<"c主进程要求子进程"<<chld_prc_idx+1<<"退出"<<endl;
+									return ;			//主进程要求子进程退出
+								}	
+							}
+													
+						}
+
+						memset(szBuff, 0, 1012 );      //将数据清空
+					}
+
+					_infile.Close();
+
+				}
+				//catch (std::bad_alloc& ba) 
+				//{
+				//	std::cerr << "内存分配失败bad_alloc caught: " << ba.what() << '\n';
+				//	return ;
+				//}
+				catch(jsexcp::CException e)
+				{
+					//theLog << e.GetErrMessage() <<endw;
+					cout<<"子进程"<<chld_prc_idx+1<<"格式化文件出错："<<e.GetErrMessage()<<endl;
+					return ;
+				}
+					
+				cout<<chld_prc_idx+1<<"整个文件已经写入内存，请求父进程申请话单块来处理"<<endl;
+				putChldEvt(0, EVT_REQ_TASK, m_lPrc_ID, getpid(), m_lPrc_ID-chld_prc_idx-1);
+				//前面的子进程发送给父进程的消息被父进程创建后面的进程时候给吸走了，
+				//另外若遇到没有话单块时则发送的任务消息也没有用了
+				while(1)
+				{
+						int ret=getChldEvt(event_sn, event_type, param1, param2, src_id);
+						if(ret<0)
+						{
+							cerr<<chld_prc_idx+1<<"子进程"<<chld_prc_idx+1<<"获取主进程事件失败！"<<endl;
+							perror("失败原因");
+							return ;
+						}
+
+						if(event_type==EVT_RESP_TASK)	//获得话单任务,处理话单块
+						{
+							task_addr=(char *)m_pTktBlkBase+(param2*m_iTicketLength*(m_iTicketNum+1));
+							ret = onTask(task_addr,chld_prc_idx+1,0);
+							//remove(tmp);
+							cout<<chld_prc_idx+1<<"子进程处理完成，发送信号给父进程表示任务结束"<<endl;
+							putChldEvt(event_sn, EVT_RPT_TASKEND, m_lPrc_ID, getpid(), m_lPrc_ID-chld_prc_idx-1);							
+							break;							
+						}
+
+						else if(event_type==EVT_REQ_STOP)  
+						{		
+							cout<<"c主进程要求子进程"<<chld_prc_idx+1<<"退出"<<endl;
+							return ;			
+						}
+				}
+					
+			}
+
+			scan.closeDir();
+			++it; 
+	
+		   if(it == m_SourceCfg.end())   //此时没有文件，并且如果到达末尾，回到队头
+		   {
+			 //cout<<"回到数据源头"<<endl;
+			 it = m_SourceCfg.begin();
+		   }
+
+		   sleep(1);		   
+	 }//while(true)
+}
+
+
+/********************************************/
+
+//判断是否要申请话单块
+int FormatPlugin::onBeforeTask()
+{
+	 //cout<<"\n申请话单块,获取文件列表信息"<<endl;
+	int ret = -1;
+	//ret=getChldEvt(event_sn, event_type, param1, param2, src_id,false);
+	
+    return ret;
+}
+
+//子进程初始化
+bool FormatPlugin::onChildInit()
+{
+   cout<<"子进程初始化$$$$$$$$$$$$$$$$$$$$";
+   //char* m_szEnvFile = "/mboss/home/zhjs/etc/zhjs/zhjs.ini" ;
+   //try
+   //{
+	//connectDB(m_szEnvFile, _DBConn[chld_prc_idx]);
+  // }
+  // catch (jsexcp::CException &e)
+  // {
+  //	   cout<<"子进程连接数据库失败"<<chld_prc_idx+1<<endl;
+ //	   return false ;
+   //}
+   
+   it = m_SourceCfg.begin();        //先获取数据源信息
+   pps = new PacketParser();
+   res = new ResParser();
+   //cout<<"初始化结束"<<endl;
+   return true;
+   
+}
+
+
+//处理成功返回话单条数(>=0)
+int FormatPlugin::onTask(void *task_addr, int offset, int ticket_num)
+{
+    cout<<"子进程"<<offset<<"处理话单块喽！！！！！！！ 任务地址："<<task_addr<<endl;
+    //cout<<"任务地址:"<<task_addr<<":"<<(char*)task_addr<<":"<<endl;
+ 
+    memset(task_addr,0,getBlockSize());   //初始化话单内存块,清空内存	
+
+	PkgBlock pkg((char*)task_addr);       //话单块类初始化
+	pkg.init(getTicketLength(),getBlockSize());
+	
+	char* p = strrchr(file_name,'/');
+	char tmp[512];
+	strcpy(tmp,p+1);
+
+	cout<<offset<<"处理文件："<<file_name<<"记录条数"<<m_record.size()<<endl;
+	
+	pkg.setModuleId(getModuleID());			//设置模块ID
+	pkg.setStatus(0);						//话单状态，0未处理，1处理
+	pkg.setSourceId(it->first.c_str());		//设置数据源
+	pkg.setFileHeadFlag(0);					//设置文件头标志
+	pkg.setFileTailFlag(0);					//设置文件尾标志
+	pkg.setFileType(it->second.szInFileFmt);//设置文件类型
+    pkg.setFileName(tmp);  //设置文件名  
+
+	//vector<PkgFmt> rcd = fileRecord[fileN];  //设置文件记录
+	for(int i = 0;i<m_record.size();i++)
+	{
+			//cout<<"要写的话单记录："<<m_record[i].record<<" 记录长度："<<strlen(m_record[i].record)<<endl;
+			pkg.writePkgRecord(m_record[i]);
+	}
+
+	pkg.setStatus(1);
+	pkg.setNamalRcdNum(m_record.size());
+	pkg.setRecordNum(m_record.size());   
+
+	
+	//char path[1024] = "/mboss/home/zhjs/data/service/HED/test/";
+    // strcat(path,pkg.getFileName());
+	//ofstream out(path);
+	//if(!out)
+    // {
+	//	 cout<<"打开文件失败！！！"<<path<<endl;
+	//	 return -1;
+    //}
+	//out<<pkg.getPkgRcd(2)<<"\n";  //写话单文件记录
+	//cout<<"第1条记录为："<<"  状态码为："<<pkg.getRcdStatus(1)<<"	话单类型"<<pkg.getRcdType(1)<<"   编码为："<<pkg.getRcdCode(1)<<"  记录值为:"<<pkg.getPkgRcd(2)<<" 记录长度: "<<strlen(pkg.getPkgRcd(2))<<endl; 
+	
+	//char ff[1024];
+	//memset(ff,0,sizeof(ff));
+	//strncpy(ff,pkg.getPkgRcd(1),sizeof(ff));
+	//cout<<"  记录值为:"<<ff<<"	记录长度："<<strlen(ff)<<endl;
+    //cout<<offset<<"处理完成。发送消息成功，准备删除文件"<<endl;
+    //sleep(15); 
+    m_record.clear(); //处理完成后先清理私有内存
+
+   
+   return ticket_num;
+}
+
+//子进程退出前的处理
+void FormatPlugin::onChildExit()
+{
+    cout<<"子进程"<<m_lPrc_ID<<"退出前的处理"<<endl;
+	delete pps;
+    delete res;
+}
+
+
+/***************************************/
+void FormatPlugin::run()
+{
+	int cmd_sn, cmd_type, event_sn, event_type;
+	long param1, param2, src_id;
+	int ret;
+	bool err_flag=false;
+	char *task_addr;
+	struct timeval start_tm, end_tm;
+	
+	checkChild();
+
+	//cout<<"是否高地水:"<<m_bHLLCtrl<<endl;
+	while(true)
+	{
+		if(gbExitSig || !gbNormal)  //主进程退出或者子进程异常退出
+		{
+			//if(gbExitSig) PS_Process::writeLog(LOG_CODE_APP_SEM_EXIT_ERR, "应用程序收到退出信号");
+			cout<<"应用程序收到退出信号--"<<gbExitSig<<gbNormal<<endl;
+
+			prcExit();
+			return;
+		}
+		
+		if(m_bSuspSig || err_flag) //挂起、出错
+		{
+			sleep(1);
+			continue;
+		}
+					
+		//省略一系列的任务操作
+
+		//putChldEvt(0, EVT_REQ_TASK, m_lPrc_ID, getpid(), m_lPrc_ID-chld_prc_idx-1);
+		if(task.size() == 0)
+		{	
+			ret=getChldEvt(event_sn, event_type, param1, param2, src_id,false);
+			//ret=onBeforeTask();		//判断是否要申请话单块
+			//cout<<"收到子进程发来的请求话单信息:"<<ret<<" "<<EVT_REQ_TASK<<"VS"<<event_type<<" "<<param1<<"  "<<param2<<endl;
+			if(event_type != EVT_REQ_TASK)
+			{
+				continue;
+			}
+		
+			switch(ret)
+			{
+				case 0:
+					sleep(1);
+					continue;
+					break;
+				case 1:
+					break;
+				default:
+					prcExit();
+					return;
+			}
+			
+			task.push(param1);
+		}	
+		
+		//int child_id = param1;		
+		if( !putEvt(0, EVT_REQ_TASK, 0, 0, DSPCH_PRC_ID) )
+		{
+			prcExit();
+			return;
+		}
+		
+		while(true)
+		{
+			ret=getEvt(event_sn, event_type, param1, param2, src_id);	//从调度获得任务分配
+			if(ret<0)
+			{
+				prcExit();
+				return;
+			}
+			//cerr<<"获取事件"<<event_type<<"/"<<param1<<"/"<<param2<<endl;
+			if(event_type==EVT_RESP_TASK) break;
+			else if(event_type==EVT_RESP_ERR) break;
+			else cerr<<"该事件为非法事件\n";
+		}
+
+		if(event_type==EVT_RESP_TASK)
+		{
+			if(param1<=0)  //没有话单任务
+			{
+				usleep(10000);
+				continue;
+			}
+			cout<<"父进程向调度申请到话单块！发送消息给子进程"<<task.front()<<endl;
+			//task_addr=(char *)m_pTktBlkBase+(param2*m_iTicketLength*(m_iTicketNum+1));	//计算任务地址，通过消息传给子进程		
+			gettimeofday(&start_tm, 0);	//记录开始处理时间
+			putChldEvt(0, EVT_RESP_TASK, param1,param2,task.front()); 
+			
+			for(int i=0; i<MAX_CHLD_PRC_NUM; i++)    //修改子进程状态为繁忙
+			{
+				if( g_stChldPrcInfo[i].m_lPrc_ID == task.front() && g_stChldPrcInfo[i].state==PRCST_IDLE )
+				{
+					g_stChldPrcInfo[i].state=PRCST_BUSY;
+				}
+
+			}
+
+			//接收子进程做完话单块任务消息
+			//int p2 = 0;  获取的参数param1 param2等由于这儿从新获取的，所以会覆盖调度传过来的值，最好不要改动
+			while(true)
+			{
+				long p1 = -1, p2 = -1;
+				ret=getChldEvt(event_sn, event_type, p1, p2, src_id);
+				if(ret<=0) return ;						//出错(ret<0)、子进程退出(ret==0) 或 收到kill信号(ret==0)
+				else if(event_type == EVT_RPT_TASKEND)
+				{				
+					cout<<"父进程收到子进程做完任务消息."<<endl;
+
+					for(int i=0; i<MAX_CHLD_PRC_NUM; i++)    //任务做完后修改子进程状态为空闲
+					{
+						if( g_stChldPrcInfo[i].m_lPrc_ID == task.front())
+						{
+							g_stChldPrcInfo[i].state=PRCST_IDLE;
+						}
+
+					}
+
+					task.pop();
+					cout<<"----------------------------------------------------------------"<<endl;
+					break;
+				}
+				else if(event_type == EVT_REQ_TASK) //防止其他子进程申请的话单任务被丢掉
+				{
+					task.push(param1);
+				}
+
+			}
+
+//---------------------------------------------------------------------------------------------------------------
+			gettimeofday(&end_tm, 0);		//记录处理结束时间
+			int duration=end_tm.tv_sec*1000000 + end_tm.tv_usec - start_tm.tv_sec*1000000 - start_tm.tv_usec;
+			//cerr << "处理当前块花费时间为" << duration << "微秒" << endl;
+			
+			sleep(10);
+			if(ret==-10 || ret==-11)
+			{
+				prcExit();
+				return;
+			}
+			else if(ret==-1)
+			{
+				err_flag=true;
+				cerr<<"返回失败执行结果\n";
+				if( !putEvt(event_sn, EVT_RPT_TASKEND, -1, param2, DSPCH_PRC_ID) )
+				{
+					prcExit();
+					return;
+				}
+				continue;
+			}
+			else
+			{
+				if( !putEvt(event_sn, EVT_RPT_TASKEND, 1, param2, DSPCH_PRC_ID) )
+				{
+					prcExit();
+					return;
+				}
+				if( !putEvt(event_sn, EVT_RPT_PERF, ret, duration, DSPCH_PRC_ID) )
+				{
+					prcExit();
+					return;
+				}
+			}
+
+		}
+	}
+
+}
+
+//检测子进程的任务数目
+void FormatPlugin::checkChild()
+{
+	int  event_sn, event_type;
+	long param1, param2, src_id;
+	int ret;
+	int i = 0;
+	while(i < childNum )
+		{			
+			
+				pid_t pid;
+				//chld_prc_idx = i;
+				switch(pid=fork())
+				{
+						case 0:		//子进程处理
+							childRun(i);
+							prcExit();
+							return;
+
+						case -1:
+							cerr << "派生子进程失败!" << endl;
+							prcExit();
+							return;
+
+						default:   //父进程处理
+
+							cerr<<"增加子进程"<<pid<<"(子进程序号="<<i+1<<")...";
+							g_stChldPrcInfo[i].pid=pid;
+							g_stChldPrcInfo[i].state=PRCST_STARTING;
+
+							while(true)
+							{
+								ret=getChldEvt(event_sn, event_type, param1, param2, src_id);
+								if(ret<=0)
+								{
+									if( ret==0 && g_stChldPrcInfo[i].state==PRCST_INACTV )
+									{
+										g_stChldPrcInfo[i].pid=0;
+										break;
+									}
+									else
+									{
+										prcExit();
+										return;
+									}
+								}
+
+								if( param1==m_lPrc_ID+i+1 && pid==param2 && event_type==EVT_RESP_START )
+								{
+									if(param2>0)
+									{
+										cerr<<"成功！\n";
+										g_stChldPrcInfo[i].pid=pid;
+										g_stChldPrcInfo[i].m_lPrc_ID=param1;
+										g_stChldPrcInfo[i].state=PRCST_IDLE;
+										g_iChldPrcNum++;
+										
+										i++;  //子进程数目+1
+									}
+									else
+									{
+										g_stChldPrcInfo[i].pid=0;
+										cerr<<"失败！\n";
+									}
+									break;
+								}
+								
+								else if(event_type == EVT_REQ_TASK)
+								{
+									cout<<"【保存话单任务信息】";
+									task.push(param1);
+								}
+							}
+				}			
+
+			//break;
+		}
+
+}
+

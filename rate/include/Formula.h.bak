@@ -1,0 +1,51 @@
+#ifndef FORMULA_H_
+
+#define FORMULA_H_
+
+#include <string>
+
+#include <map>
+#include <math.h>
+
+using namespace std;
+
+class Formula {
+public:
+	string* GetExpr() {
+		return &expr_;
+	}
+
+	map<string, float>* GetVars() {
+		return &vars_;
+	}
+
+	bool Calc(float& sum);
+	double Round(double d, int iPrecision);
+  Formula();
+  ~Formula();
+private:
+	bool IsVar(int& index, float& number);
+
+	bool IsNumber(int& index, float& number);
+
+	bool IsFactor(int& index, char sign, float factor, float& product);
+
+	bool IsExpr(int& index, char sign, float addend, float& addtion);
+
+	float Sign(char sign, float operand, float operanded);
+
+	void Space(int& index);
+
+	static bool IsZero(float number);
+
+	char GetPrefix(int& index);
+	
+
+private:
+	string expr_;
+	bool err_;
+	map<string, float> vars_;
+};
+
+
+#endif

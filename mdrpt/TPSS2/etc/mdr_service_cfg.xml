@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+
+<!-- ÒµÎñÅäÖÃÐÅÏ¢£¬mdrmgrºÍsr api¶ÁÈ¡¸ÃÅäÖÃÎÄ¼þ  ²ÎÊýÍ¨¹ýÃüÁî¼¯Ë¢ÐÂÉúÐ§£¬²»ÐèÒªÖØÆôÏµÍ³-->
+
+<target name="basic">
+	<!-- ÒµÎñÍøÔªµÄÅäÖÃÐÅÏ¢ -->
+	<node_group>
+		<node name="TPSS">
+			<!-- ÓÃÓÚSRÏò±¸ÏµÍ³·¢ËÍCCRÊ±¿ØÖÆ·¢ËÍË³Ðò£¬Ã¿´ÎSR±ØÐëÏòmdrmgrÑ¯ÎÊ¿ÉÒÔ·¢ËÍÄÄ¸öCCR-->
+			<!-- ¿ÉÑ¡²ÎÊý£¬ÔÊÐíÃ»ÓÐ£¬µ±Ã»ÓÐÊ±±íÊ¾ËùÓÐÄÜÁ¦¶¼²»ÐèÒªÅÅ¶Ó-->
+			<queue_group>
+				<!-- queue name="DUMMY" capbility_list="DUMMY-TestCap,DUMMY-AnotherTestCap"/ -->
+			</queue_group>
+
+			<!-- ÓÃÓÚ¿ØÖÆCCRÖØ·¢£¬Èç¹û²»ÅäÖÃ±íÊ¾²»ÔÊÐíÖØ·¢-->
+			<re_send>
+				<!-- name:ÄÜÁ¦Ãû³Æ£»times:×î´óÖØ·¢´ÎÊý;interval:ÖØ·¢Ê±¼ä¼ä¸ô£¬µ¥Î»ÎªÃë-->
+				<!-- capbility name="DUMMY-TestCap" max_times="3" interval="60"/ -->
+			</re_send>
+
+			<!-- ÈÝÔÖµÄÄÜÁ¦  -->
+			<mdr_capability>
+				<!-- r_flag£¬1±íÊ¾CCR£¬0±íÊ¾CCA-->
+				<!-- capbility name="DUMMY-TestCap" r_flag="1"/-->
+			</mdr_capability>
+			
+			<!-- Ö÷±¸ÒÀÀµµÄÄÜÁ¦ -->
+			<capa_dependent>
+				<!-- name ÄÜÁ¦Ãû£¬ÀýÈçAB±íÖÐµÄCCR2µÄÄÜÁ¦ºÍCCR2µÄÔ´ÍøÔªÃû×Ö  -->
+				<!-- capbility name="NAV-SIINFO.HB" / -->
+			</capa_dependent>
+
+			<!-- ÈÝÔÖµÄÁ½¸öÍøÔªµÄÅäÖÃ-->
+			<!-- audit_timeout:ÖÙ²Ã³¬Ê±Ê±¼ä£¬µ¥Î»:Ãë£»exp_time:session¹ýÆÚÊ±¼ä£¬µ¥Î»:Ð¡Ê±-->
+			<!-- query_cnt²éÑ¯Ò»´Î×î´ó·µ»ØµÄÌõÊý,·¶Î§[1,1000]-->
+			<mdr_node_group AuditMode="FOLLOW" Duplex="DUPLEX" audit_timeout="10" exp_time="72" query_cnt="10">
+				<dr_node name="TPSS1" Location="PEER"  DRStatus="MASTER"/>
+				<dr_node name="TPSS2" Location="LOCAL" DRStatus="SLAVE"/>
+			</mdr_node_group>
+		</node>
+	</node_group>
+</target>
+

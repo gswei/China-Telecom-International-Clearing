@@ -1,0 +1,36 @@
+#ifndef _C_CFILELOCK_
+#define _C_CFILELOCK_
+
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+#include "FilterCommonStruct.h"
+#include "FilterCommonFunction.h"
+
+class C_CFileLock
+{
+	public:
+		C_CFileLock()
+		{
+			memset(m_szfile, 0, sizeof(m_szfile));
+			m_fd = -1;
+		};
+		~C_CFileLock()
+		{
+			if(m_fd != -1)
+			{
+				close(m_fd);
+			}
+		};
+		void Init(const char* szPath);
+		void Lock();
+		void UnLock();
+	private:
+		char m_szfile[FILTER_FILESIZE];
+		int m_fd;
+};
+
+#endif
+

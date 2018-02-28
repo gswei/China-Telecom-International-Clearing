@@ -1,0 +1,27 @@
+include ../config.mk
+
+#all=commem comemclient
+all=commem
+
+#billing object objs
+
+objs1=BlockAllocator.o C_NRWLock.o RecordList.o CommonMemIndex.o CommonMemLenIndex.o CommonMemAVLIndex.o CommonMemManager.o CommonMemRecord.o CommonMemTable.o CommonMemTableDefine.o Mem_main.o
+
+#objs2=Mem_client.o CommonMemClient.o BlockAllocator.o C_NRWLock.o RecordList.o CommonMemIndex.o CommonMemLenIndex.o CommonMemAVLIndex.o CommonMemRecord.o CommonMemTable.o
+
+
+all:$(all)
+
+commem:$(objs1)
+	$(MAKE) exe TARGET_NAME=$@ TARGET_OBJS="BlockAllocator.o C_NRWLock.o RecordList.o CommonMemIndex.o CommonMemLenIndex.o CommonMemAVLIndex.o CommonMemManager.o CommonMemRecord.o CommonMemTable.o CommonMemTableDefine.o Mem_main.o"
+
+#memclient:$(objs2)
+	$(MAKE) exe TARGET_NAME=$@ TARGET_OBJS="Mem_client.o CommonMemClient.o BlockAllocator.o C_NRWLock.o RecordList.o CommonMemIndex.o CommonMemLenIndex.o CommonMemAVLIndex.o CommonMemRecord.o CommonMemTable.o"
+
+clear:
+	rm -f *.o
+
+#Overwrite complie flag
+#DEFAULT_COMPILE=$(COMPILE_THREAD)
+#DEFAULT_BUILD=$(BUILD_THREAD_EXE)
+

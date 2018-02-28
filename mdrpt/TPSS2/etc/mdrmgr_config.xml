@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+
+<!-- Ö»ÓÐmdrmgr¶ÁÈ¡¸ÃÅäÖÃÎÄ¼þ -->
+<target name="basic">
+	<!-- mdrmgrµÄÅäÖÃÐÅÏ¢,È«²¿ÖØÆôÉúÐ§¡£send_bat_cntÎªmdrmgrÖ®¼äÅúÁ¿·¢ËÍÊý¾ÝµÄ×î´óÊýÁ¿-->
+	<mdrmgr_group send_bat_cnt="10">
+		<!-- port##±íÊ¾mdrmgrÔÚÄÄ¸ö¶Ë¿Ú¼àÌýÈÝÔÖapiµÄÁ¬½ÓÇëÇó,¶ÔÓÚ¶Ô¶ËmdrmgrÎª¶Ô¶Ë¼àÌý¶Ë¿Ú-->
+		<mdrmgr name="PEER"  ip="127.0.0.1" port="33330" unixuser="tuxedo"/>
+		<mdrmgr name="LOCAL" ip="127.0.0.1" port="55550" unixuser="tuxedo"/>
+	</mdrmgr_group>
+
+	<!-- µÇÂ½¼øÈ¨ÅäÖÃ, IPºÍunixuser##ÓÃÓÚ¶ÔÈÝÔÖapiµÄÁ¬½ÓÇëÇó½øÐÐµÇÂ¼¼øÈ¨-->
+	<login_group>
+		<node name="TPSS2" ip="127.0.0.1" unixuser="tuxedo"/>
+		<node name="cmdset" ip="127.0.0.1" unixuser="tuxedo"/>
+	</login_group>
+</target>
+

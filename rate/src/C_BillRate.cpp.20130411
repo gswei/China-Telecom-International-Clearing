@@ -1,0 +1,845 @@
+/****************************************************************
+  Project	
+  Copyright (c)	2010-2011. All Rights Reserved.		广东亿迅科技有限公司 
+  FUNCTION:	一次批价
+  FILE:		C_BillRate.h
+  AUTHOR:	liuw
+  Create Time: 2010-05-10
+  last update by licm 20101223
+==================================================================
+  Description:  
+		结合综合计费结算3.0系统的新框架设计，批价模块用插件形式实现
+  UpdateRecord: 
+==================================================================
+
+ *****************************************************************/
+ 
+#include "C_BillRate.h"
+
+extern SParameter Param;
+ 
+BillRate::BillRate()
+	{
+		//
+		getCurTime(szStartupTime);
+	}
+	
+BillRate::~BillRate()
+	{
+
+	  if (Param.pRuleFieldIndex)
+	    delete[] Param.pRuleFieldIndex;
+	  if (Param.pRuleFieldIsNull)
+	    delete[] Param.pRuleFieldIsNull;    
+	  if (Param.pRuleFieldMatchMode)
+	    delete[] Param.pRuleFieldMatchMode;        
+	  if (Param.rule_exact)
+	    delete Param.rule_exact;
+	  if (Param.rule_blur)
+	    delete Param.rule_blur;
+
+	
+	  FreeRuleStruct(Param.szDebugFlag,&Param.rsblur, Param.iBlurCount);
+	  FreeRateStruct(Param.szDebugFlag,&Param.ratestruct);
+	  FreeAdjRateStruct(Param.szDebugFlag,&Param.adjratestruct);
+	}
+
+void BillRate::init(char *szSourceGroupID,char * ServiceId,int index)
+	{
+		//获取数据源组配置变量情况
+		DEBUG_LOG<<"Start init BillRate"<<endd;
+		strcpy(Param.szSourceGroup , szSourceGroupID);
+		strcpy(Param.ServiceID , ServiceId);
+		CBindSQL ds(DBConn);
+		char szTemp[512];
+
+		getEnvFromDB(DBConn,  Param.ServiceID,Param.szSourceGroup,"", "RATE_CONFIG_ID", Param.szRateConfigId);
+		DEBUG_LOG<<"RATE_CONFIG_ID = "<<Param.szRateConfigId<<endd;
+
+		getEnvFromDB(DBConn,  Param.ServiceID,Param.szSourceGroup,"", "RATE_RULE_SAVING_INTERVAL", szTemp);
+		iRuleSavingInterval = atoi(szTemp);
+		DEBUG_LOG<<"RATE_RULE_SAVING_INTERVAL = "<<iRuleSavingInterval<<endd;
+
+		getEnvFromDB(DBConn,  Param.ServiceID,Param.szSourceGroup,"", "RATE_RULE_EXPIRATION_DATE", szTemp);
+		Param.iRuleExpirationDate = atoi(szTemp);
+		if (Param.iRuleExpirationDate == 0)
+			Param.iRuleExpirationDate = 999999;
+		DEBUG_LOG<<"RATE_RULE_EXPIRATION_DATE = "<<Param.iRuleExpirationDate<<endd;
+
+		getEnvFromDB(DBConn,  Param.ServiceID,Param.szSourceGroup,"", "RATE_RULE_PATH", Param.szRuleExactFile);
+		completeDir(Param.szRuleExactFile);
+		if (access(Param.szRuleExactFile, F_OK) != 0)
+		{
+			sprintf(szLogStr, "RATE_RULE_PATH(%s) not exist!", Param.szRuleExactFile);
+			jsexcp::CException e(CALCFEE_ERR_IN_READ_ENV_VAR, szLogStr, __FILE__, __LINE__);
+			throw e;
+		}
+		strcat(Param.szRuleExactFile, Param.szSourceGroup);
+		strcpy(Param.szRuleExactidx,Param.szRuleExactFile);
+		strcat(Param.szRuleExactFile, ".DAT");
+		DEBUG_LOG<<"RATE_RULE_PATH = "<<Param.szRuleExactFile<<endd;
+		strcat(Param.szRuleExactidx, ".IDX");
+		DEBUG_LOG<<"RATE_IDX_PATH = "<<Param.szRuleExactidx<<endd;		
+
+		getEnvFromDB(DBConn,  Param.ServiceID,Param.szSourceGroup,"", "RATE_RULE_PATH_BAK", Param.szRuleExactFileBak);
+		completeDir(Param.szRuleExactFileBak);
+		if (access(Param.szRuleExactFileBak, F_OK) != 0)
+		{
+			sprintf(szLogStr, "RATE_RULE_PATH_BAK(%s) not exist!", Param.szRuleExactFileBak);
+			jsexcp::CException e(CALCFEE_ERR_IN_READ_ENV_VAR, szLogStr, __FILE__, __LINE__);
+			throw e;
+		}    
+		strcat(Param.szRuleExactFileBak, Param.szSourceGroup);
+		strcat(Param.szRuleExactFileBak, ".DAT");
+		DEBUG_LOG<<"RATE_RULE_PATH_BAK = "<<Param.szRuleExactFileBak<<endd;
+		
+		getEnvFromDB(DBConn,  Param.ServiceID,Param.szSourceGroup,"", "RATE_USE_RULE_MATCH", szTemp);
+		if (strcmp(szTemp, "Y") == 0)
+		{
+			Param.bUseRuleMatch = true;
+			DEBUG_LOG<<"bUseRuleMatch=True;"<<endd;
+		}
+		else
+		{
+			Param.bUseRuleMatch = false;
+			DEBUG_LOG<<"bUseRuleMatch=False;"<<endd;
+		}
+		//用于两次查找，对比分析结果。
+		getEnvFromDB(DBConn,  Param.ServiceID,Param.szSourceGroup,"", "RATE_USE_MULTI_FIND", szTemp);
+		if (strcmp(szTemp, "Y") == 0)
+		{
+			Param.bUseMultiFind = true;
+			DEBUG_LOG<<"bUseMultiFind=True;"<<endd;
+		}
+		else
+		{
+			Param.bUseMultiFind = false;
+			DEBUG_LOG<<"bUseMultiFind=False;"<<endd;
+		}
+		
+
+		
+		//读取批价基本配置
+    ds.Open("select RATING_CONFIG_ID, TABNAME_RULE, TABNAME_GROUPLEVEL, TABNAME_RATEGROUP, TABNAME_CHARGETYPE, TABNAME_RATELEVEL, TABNAME_RATE, TABNAME_ADJRATE, RULE_PIPE_NAME from c_rating_config_def where rating_config_id=:szRateConfigId", SELECT_QUERY );
+    ds<<Param.szRateConfigId;
+    if (!(ds>>Param.rate_config.szConfigId>>Param.rate_config.szTablenameRule>>Param.rate_config.szTablenameGroupLevel
+    		>>Param.rate_config.szTablenameRateGroup>>Param.rate_config.szTablenameChargeType
+    		>>Param.rate_config.szTablenameRateLevel
+    		>>Param.rate_config.szTablenameRate>>Param.rate_config.szTablenameAdjrate
+    		>>Param.rate_config.szRulePipeName))
+	    {
+	    	strcpy(szLogStr, "read rule field information from table rating_config_def error!");
+				jsexcp::CException e(CALCFEE_ERR_IN_SELECT_DB, szLogStr, __FILE__, __LINE__);
+				throw e;	    	
+	    }
+    ds.Close();
+
+    ds.Open("select count(*) from c_rating_field_def where rating_config_id=:szRateConfigId", SELECT_QUERY );
+    ds<<Param.szRateConfigId;
+    ds>>Param.iRuleFieldCount;
+    if ((Param.iRuleFieldCount < 1) || (Param.iRuleFieldCount > RATE_MAX_RULEITEM_NUM))
+	    {
+	    	sprintf(szLogStr, "批价规则字段个数在 1..%d!之间", RATE_MAX_RULEITEM_NUM);
+				jsexcp::CException e(CALCFEE_ERR_IN_SELECT_DB, szLogStr, __FILE__, __LINE__);
+				throw e;	    	
+	    }
+    ds.Close();
+    DEBUG_LOG<<"iRuleFieldCount = "<<Param.iRuleFieldCount<<endd;
+
+		Param.pRuleFieldIndex = new int[Param.iRuleFieldCount];
+		if (!Param.pRuleFieldIndex)
+    	{
+      	strcpy(szLogStr, "New pRuleFieldIndex fail.");
+				jsexcp::CException e(CALCFEE_ERR_NOT_ENOUGH_MEMORY, szLogStr, __FILE__, __LINE__);
+				throw e;	      	
+    	}
+
+		Param.pRuleFieldIsNull = new int[Param.iRuleFieldCount];
+		if (!Param.pRuleFieldIsNull)
+			{
+				strcpy(szLogStr, "New pRuleFieldIsNull fail.");
+				jsexcp::CException e(CALCFEE_ERR_NOT_ENOUGH_MEMORY, szLogStr, __FILE__, __LINE__);
+				throw e;	  
+			}
+		
+		Param.pRuleFieldMatchMode = new int[Param.iRuleFieldCount];
+		if (!Param.pRuleFieldMatchMode)
+			{
+				strcpy(szLogStr, "New pRuleFieldMatchMode fail.");
+				jsexcp::CException e(CALCFEE_ERR_NOT_ENOUGH_MEMORY, szLogStr, __FILE__, __LINE__);
+				throw e;	  
+			}
+		
+		//获取入口话单格式	
+    ds.Open("select filetype_id from C_SOURCE_GROUP_DEFINE where Source_Group= :Source_Group", SELECT_QUERY );
+    ds<<Param.szSourceGroup;
+    if (!(ds>>Param.szInputFiletypeId))
+    {
+    		strcpy(szLogStr, "数据源组统一格式在C_SOURCE_GROUP_DEFINE未定义");
+				jsexcp::CException e(CALCFEE_ERR_IN_SELECT_DB, szLogStr, __FILE__, __LINE__);
+				throw e;
+    }
+    
+    inrcd.Init(Param.szInputFiletypeId);
+    outrcd.Init(Param.szInputFiletypeId);			
+
+		//改成按字段名称取序号，而不是直接配置		
+		ds.Open("select r.field_name,t.col_index,r.field_isnull,r.field_matchmode \
+							from c_rating_field_def r,c_txtfile_fmt t\
+							where r.rating_config_id=:szRateConfigId \
+							and t.filetype_id=:szInputFiletypeId and t.colname=r.field_name order by r.field_order_no", SELECT_QUERY );
+		ds<<Param.szRateConfigId<<Param.szInputFiletypeId;
+		for (int i=0; i<Param.iRuleFieldCount; i++)
+			{
+				if (!(ds>>Param.szRuleFieldItem[i]>>Param.pRuleFieldIndex[i]>>Param.pRuleFieldIsNull[i]>>Param.pRuleFieldMatchMode[i]))
+					{
+						strcpy(szLogStr, "read rule field information from table rating_field_def error!");
+						jsexcp::CException e(CALCFEE_ERR_IN_SELECT_DB, szLogStr, __FILE__, __LINE__);
+						throw e;
+					}
+			}
+		ds.Close();
+		
+		
+		Param.szRuleFieldName[0] = 0x00;
+		for (int i=0; i<Param.iRuleFieldCount; i++)
+			{
+				int iLen;
+				strcat(Param.szRuleFieldName, Param.szRuleFieldItem[i]);
+				if (i<Param.iRuleFieldCount -1)
+					{
+						iLen = strlen(Param.szRuleFieldName);
+						Param.szRuleFieldName[iLen] = ',';
+						Param.szRuleFieldName[iLen + 1] = 0x00;
+					}
+			}
+		
+		Param.szRuleFieldMatchMode[0] = 0x00;
+		for (int i=0; i<Param.iRuleFieldCount; i++)
+			{
+				int iLen;
+				sprintf(Param.szRuleFieldMatchMode, "%s%d", Param.szRuleFieldMatchMode, Param.pRuleFieldMatchMode[i]);
+				if (i<Param.iRuleFieldCount -1)
+					{
+						iLen = strlen(Param.szRuleFieldMatchMode);
+						Param.szRuleFieldMatchMode[iLen] = ',';
+						Param.szRuleFieldMatchMode[iLen + 1] = 0x00;
+					}
+			}
+			
+
+    //*********************************************************************
+    // 初始化精确规则及模糊规则类
+    //*********************************************************************
+    Param.rule_exact= new CRuleExact(Param.szRuleExactFile,Param.szRuleExactidx);
+    if (!Param.rule_exact)
+    	{
+    		strcpy(szLogStr, "New rule_exact fail.");
+				jsexcp::CException e(CALCFEE_ERR_NOT_ENOUGH_MEMORY, szLogStr, __FILE__, __LINE__);
+				throw e;
+    	}
+
+    Param.rule_blur = new CRuleBlur(Param.iRuleFieldCount, Param.szRuleFieldMatchMode);
+    if (!Param.rule_blur)
+    	{
+    		strcpy(szLogStr, "New rule_blur fail.");
+				jsexcp::CException e(CALCFEE_ERR_NOT_ENOUGH_MEMORY, szLogStr, __FILE__, __LINE__);
+				throw e;
+    	}
+
+    Param.rate_group = new CRateGroup();
+    if (!Param.rate_group)
+    	{
+    		strcpy(szLogStr, "New rate_group fail.");
+				jsexcp::CException e(CALCFEE_ERR_NOT_ENOUGH_MEMORY, szLogStr, __FILE__, __LINE__);
+				throw e;
+    	}
+
+    Param.charge_type = new CChargeType();
+    if (!Param.charge_type)
+   	 	{
+    		strcpy(szLogStr, "New charge_type fail.");
+				jsexcp::CException e(CALCFEE_ERR_NOT_ENOUGH_MEMORY, szLogStr, __FILE__, __LINE__);
+				throw e;
+    	}
+
+    //*********************************************************************
+    // 获取“用于条件判断的日期时间字段”的序号
+    //*********************************************************************
+
+    
+    ds.Open("select col_index from c_txtfile_fmt where filetype_id= :filetype_id and col_fmt='C'", SELECT_QUERY );
+    ds<<Param.szInputFiletypeId;
+    if (!(ds>>Param.iTimeIndex))
+    {
+    		strcpy(szLogStr, "select col_index from c_txtfile_fmt where filetype_id= :filetype_id and col_fmt='C' is NULL");
+				jsexcp::CException e(CALCFEE_ERR_IN_SELECT_DB, szLogStr, __FILE__, __LINE__);
+				throw e;
+    }
+    ds.Close();
+    DEBUG_LOG<<"CDR Time Index = "<<Param.iTimeIndex<<endd;
+    
+   
+    //***********************************************************
+    // 将pipe_id加入到rule_pipe表中
+    //***********************************************************
+    int iCount;
+    char szRuleName[31];
+
+    strcpy(szRuleName, Param.rate_config.szRulePipeName);
+    ds.Open("select count(*) from c_rule_update where rule_name=:rule_name \
+       and Source_Group=:Source_Group", SELECT_QUERY );
+    ds<<szRuleName<<Param.szSourceGroup;
+    ds>>iCount;
+    ds.Close();
+
+    if (iCount == 0) {
+      ds.Open("insert into c_rule_update(Source_Group,rule_name,need_update) \
+         values(:Source_Group,:rule_name,'N')",NONSELECT_DML);
+      ds<<Param.szSourceGroup<<szRuleName;
+      ds.Execute();
+      ds.Close();
+    }
+
+    /*ds.Open("update c_rule_update set need_update='Y' where Source_Group=:Source_Group and \
+       rule_name=:rule_name",NONSELECT_DML);
+    ds<<Param.szSourceGroup<<szRuleName;
+    ds.Execute();
+    ds.Close();
+    DBConn.Commit();*/
+    
+    //将模糊匹配RULE数据由数据表载入内存
+		DEBUG_LOG<<"Loading table "<<Param.rate_config.szTablenameRule<<" into memory..."<<endd;
+		if (InitRuleStruct(Param.szDebugFlag, &Param.rsblur, Param.rate_config.szTablenameRule,
+			Param.szRuleFieldName, Param.iBlurCount, Param.iBlurMax, "") == 0)
+			{
+				DEBUG_LOG<<"Load table "<<Param.rate_config.szTablenameRule<<" into memory successfully!"<<endd;
+			}
+		else
+			{
+				sprintf(szLogStr, "Load table %s into memory failed!", Param.rate_config.szTablenameRule);
+				jsexcp::CException e(CALCFEE_ERR_IN_LOAD_TABLE, szLogStr, __FILE__, __LINE__);
+				throw e;			        			
+			}
+		
+		//将精确匹配RULE数据由文件载入内存
+		//加锁
+		Param.rule_exact->memManager.filelock.Lock();
+		
+		//载入
+		if ( Param.bUseRuleMatch == true && Param.rule_exact->memManager.pShm->MemVersion == 0)
+			{
+			  DEBUG_LOG<<"Loading rule_exact into memory..."<<endd;
+			  try
+			  	{
+			  		 if((Param.rule_exact->memManager.ShmVarPos - Param.rule_exact->memManager.RealVarShm + Param.rule_exact->getIncreasedNo()+10000)*sizeof(SRuleVar)  > Param.rule_exact->memManager.pShm->iCurSize )
+							{
+								  Param.rule_exact->memManager.Rebuild(Param.rule_exact->getIncreasedNo()*sizeof(SRuleVar)/(50*1024*1024)+1);//重建共享内存
+									Param.rule_exact->clearRule();
+							}		     		  										
+			  	  char szRuleFieldAll[CALCFEE_RULE_LEN_MAX];
+			  	  char szExpirationDate[15];
+			  	  
+			  	  getCurTime(szExpirationDate);
+			  	  time2TimeStr(timeStr2Time(szExpirationDate) - (Param.iRuleExpirationDate * 86400), szExpirationDate);
+			  	  
+			  	  strcpy(Param.rstmp.szRateRule , szRuleFieldAll);
+			  	  Param.rule_exact->rewindFile();
+			  	  while (Param.rule_exact->readFromFile(Param.rstmp) == true)
+			  	  {
+			  	    if ((CheckRuleExact(Param.szDebugFlag, Param.rsblur, Param.iBlurCount, Param.rstmp) == 0)
+			  	      && (strcmp(Param.rstmp.szUpdateTime, szExpirationDate) >= 0))
+			  	      if (Param.rule_exact->insertRule(Param.rstmp)==false)
+			  	      {
+			  	      	  DEBUG_LOG<<"insert rule fail!"<<endd;
+			  	      }
+			  	  }
+			  	  Param.rule_exact->closeRuleFile();
+			  	  //Param.rule_exact->saveRule(Param.szRuleExactFileBak);
+			  	  Param.rule_exact->clearIncreasedNo();
+			  	  DEBUG_LOG<<"Load rule_exact into memory successfully!"<<endd;
+			  	}
+			  catch (jsexcp::CException e)
+			  	{
+						e.PushStack(CALCFEE_ERR_IN_LOAD_TABLE, "Load rule_exact into memory failed!", __FILE__,__LINE__);
+								Param.rule_exact->memManager.filelock.UnLock();
+						throw e;
+			  	}
+			  Param.rule_exact->memManager.pShm->MemVersion ++;
+			  Param.MemVersion = Param.rule_exact->memManager.pShm->MemVersion;
+				DEBUG_LOG<<"Param.MemVersion = "<<Param.MemVersion<<"\tpShm->MemVersion = "<<Param.rule_exact->memManager.pShm->MemVersion<<endd;			  
+			}
+		else if (Param.bUseRuleMatch == true && Param.rule_exact->memManager.pShm->MemVersion > 0)
+			{
+				DEBUG_LOG<<"Loading Share Memory rule_exact ..."<<endd;
+				Param.rule_exact->loadRuleMap();
+			  Param.rule_exact->clearIncreasedNo();
+			  Param.rule_exact->iTotalNo = Param.rule_exact->memManager.pShm->iRuleCount; 				
+				Param.MemVersion = Param.rule_exact->memManager.pShm->MemVersion;
+				DEBUG_LOG<<"Load rule_exact into memory successfully!"<<endd;
+				DEBUG_LOG<<"Param.MemVersion = "<<Param.MemVersion<<"\tpShm->MemVersion = "<<Param.rule_exact->memManager.pShm->MemVersion<<endd;
+			}
+		//解锁
+		Param.rule_exact->memManager.filelock.UnLock();
+		
+		//将RATEGROUP数据由数据表载入内存
+		DEBUG_LOG<<"Loading table "<<Param.rate_config.szTablenameRateGroup<<" into memory..."<<endd;
+		if (Param.rate_group->init(Param.rate_config.szTablenameRateGroup, Param.rate_config.szTablenameRateLevel, Param.rate_config.szTablenameGroupLevel, Param.szDebugFlag) == true)
+			{
+			  DEBUG_LOG<<"Load table "<<Param.rate_config.szTablenameRateGroup<<" into memory successfully!"<<endd;
+			}
+		else
+			{
+			  sprintf(szLogStr, "Load table %s into memory failed!", Param.rate_config.szTablenameRateGroup);
+				jsexcp::CException e(CALCFEE_ERR_IN_LOAD_TABLE, szLogStr, __FILE__, __LINE__);
+				throw e;
+			}
+		
+		//将CHARGETYPE数据由数据表载入内存
+		DEBUG_LOG<<"Loading table "<<Param.rate_config.szTablenameChargeType<<" into memory..."<<endd;
+		if (Param.charge_type->init(Param.rate_config.szTablenameChargeType, Param.szDebugFlag) == true)
+			{
+			  DEBUG_LOG<<"Load table "<<Param.rate_config.szTablenameChargeType<<" into memory successfully!"<<endd;
+			}
+		else
+			{
+			  sprintf(szLogStr, "Load table %s into memory failed!", Param.rate_config.szTablenameChargeType);
+				jsexcp::CException e(CALCFEE_ERR_IN_LOAD_TABLE, szLogStr, __FILE__, __LINE__);
+				throw e;
+			}
+		
+		//将RATE数据由数据表载入内存
+		DEBUG_LOG<<"Loading table "<<Param.rate_config.szTablenameRate<<" into memory..."<<endd;
+		if (InitRateStruct(Param.szDebugFlag, &Param.ratestruct, Param.iRateCount, Param.rate_config.szTablenameRate) == 0)
+			{
+			  DEBUG_LOG<<"Load table "<<Param.rate_config.szTablenameRate<<" into memory successfully!"<<endd;
+			}
+		else
+			{
+		  	sprintf(szLogStr, "Load table %s into memory failed!", Param.rate_config.szTablenameRate);
+				jsexcp::CException e(CALCFEE_ERR_IN_LOAD_TABLE, szLogStr, __FILE__, __LINE__);
+				throw e;
+			}
+		
+		//将ADJRATE数据由数据表载入内存
+		DEBUG_LOG<<"Loading table "<<Param.rate_config.szTablenameAdjrate<<" into memory..."<<endd;
+		if (InitAdjRateStruct(Param.szDebugFlag, &Param.adjratestruct, Param.iAdjRateCount, Param.rate_config.szTablenameAdjrate) == 0)
+			{
+			  DEBUG_LOG<<"Load table "<<Param.rate_config.szTablenameAdjrate<<" into memory successfully!"<<endd;
+			}
+		else
+			{
+		  	sprintf(szLogStr, "Load table %s into memory failed!", Param.rate_config.szTablenameAdjrate);
+				jsexcp::CException e(CALCFEE_ERR_IN_LOAD_TABLE, szLogStr, __FILE__, __LINE__);
+				throw e;
+			}
+		
+		DEBUG_LOG<<"iExactCount 			= "<<Param.rule_exact->getTotalNo()	<<endd;
+		DEBUG_LOG<<"iBlurCount  			= "<<Param.rule_blur->getCount()		<<endd;
+		DEBUG_LOG<<"iRateGroupCount 	= "<<Param.rate_group->getCount()		<<endd;
+		DEBUG_LOG<<"iChargeTypeCount =	"<<Param.charge_type->getCount()	<<endd;
+		DEBUG_LOG<<"iRateCount				=	"<<Param.iRateCount								<<endd;
+		DEBUG_LOG<<"iAdjRateCount		=	"<<Param.iAdjRateCount						<<endd;
+		
+		//Set update flag
+		getCurTime(szCurDatetime);
+		ds.Open("update c_rule_update set need_update='N', update_time=:szCurDatetime \
+		   where Source_Group=:SourceGroup and rule_name=:rule_name", NONSELECT_DML);
+		ds<<szCurDatetime<<Param.szSourceGroup<<Param.rate_config.szRulePipeName;
+		ds.Execute();
+		ds.Close();
+		DBConn.Commit();
+    
+} 
+	
+
+	
+void BillRate::execute(PacketParser& ps,ResParser& retValue)
+	{
+//		theLog<<"BillRate::execute() begin"<<endd;
+		CBindSQL ds(DBConn);
+		//获取每次执行开始时间，备用
+		getCurTime(szStartupTime);
+		
+		//申请临时变量备用，不放入私有变量，减少重置清零操作	
+		int iRet;
+		char szTemp[10];
+		
+		//获取出入口话单		
+		inrcd=ps.m_inRcd;
+		outrcd=retValue.m_outRcd;
+		
+		try{
+		iRet = dealRecord(Param,ps,retValue,pAuditFile,pDispFiles); 
+		}
+		catch(jsexcp::CException e)
+		{
+			strcpy(szLogStr, "批价处理未知错误");
+			e.PushStack(CALCFEE_ERR_UNKNOWN_CATCH, szLogStr, __FILE__, __LINE__);
+			throw e;
+		}
+
+        switch (iRet)
+        {
+      	  case 0: //处理成功，提交事务
+
+//						theLog<<"BillRate::execute() successful!"<<endd;
+            break;
+            
+          case -1: //批价规则缺资料
+          	DEBUG_LOG<<"BillRate::execute() lackinfo!"<<endd;
+
+          	break;
+          case -2://费率缺资料
+         
+ 						break;        
+          default: //其他一切不可预知的情况，应该不会发生
+						strcpy(szLogStr, "批价处理未知错误");
+						jsexcp::CException e(CALCFEE_ERR_UNKNOWN_CATCH, szLogStr, __FILE__, __LINE__);
+						throw e; 
+            break;
+        } //end switch
+		           
+   
+	}
+	
+void BillRate::message(MessageParser&  pMessage)
+	{
+		CBindSQL ds(DBConn);		
+		switch(pMessage.getMessageType())
+		{
+			/*批次开始*/
+			case  MESSAGE_NEW_BATCH:
+			      		//判断是否需要保存精确规则文件
+			      		if (Param.rule_exact->getIncreasedNo() > iRuleSavingInterval)
+			      			{
+			      			  DEBUG_LOG<<"Saving exact rule to file..."<<endd;
+
+										for(int i=0; i<MAX_PROC_NUM; i++)
+										{
+											Param.rule_exact->memManager.pShm->m_Process[i].isLoadFlag = 1;//需要更新
+										}
+			      				Param.rule_exact->memManager.filelock.Lock();	  									
+  									while(Param.rule_exact->memManager.IsUseMemory() == 1)
+  									{
+  										DEBUG_LOG<<"等待其他进程结束当前处理，10秒..."<<endd;
+  										sleep(10);
+  									}
+  									
+  									/*DEBUG_LOG<<"old memory size"<<Param.rule_exact->memManager.pShm->iCurSize<<endi;
+								    DEBUG_LOG<<"old begin address"<<Param.rule_exact->memManager.RealVarShm<<endi;
+								    DEBUG_LOG<<"old current address"<<Param.rule_exact->memManager.ShmVarPos<<endi;
+								    DEBUG_LOG<<"unit num"<<Param.rule_exact->memManager.ShmVarPos-Param.rule_exact->memManager.RealVarShm<<endi;
+								    DEBUG_LOG<<"irule count"<<Param.rule_exact->memManager.pShm->iRuleCount<<endi;
+								    DEBUG_LOG<<"max count"<<Param.rule_exact->memManager.pShm->iMaxRule<<endi;
+								    DEBUG_LOG<<"incoressno"<<Param.rule_exact->getIncreasedNo()<<endi;
+								    DEBUG_LOG<<"varsize:"<<sizeof(SRuleVar)<<endi;*/
+                    
+								    if((Param.rule_exact->memManager.ShmVarPos - Param.rule_exact->memManager.RealVarShm + Param.rule_exact->getIncreasedNo()+10000)*sizeof(SRuleVar)  > Param.rule_exact->memManager.pShm->iCurSize )
+								    	{
+								    		 
+								     		  DEBUG_LOG<<"apply for new memory"<<endi;
+								     		  DEBUG_LOG<<"old memory size"<<Param.rule_exact->memManager.pShm->iCurSize<<endi;
+								     		  DEBUG_LOG<<"old begin address"<<Param.rule_exact->memManager.RealVarShm<<endi;
+								     		  DEBUG_LOG<<"old current address"<<Param.rule_exact->memManager.ShmVarPos<<endi;
+								     		 
+												  Param.rule_exact->memManager.Rebuild(Param.rule_exact->getIncreasedNo()*sizeof(SRuleVar)/(50*1024*1024)+1);//重建共享内存
+												  Param.rule_exact->clearRule();
+												  
+												  DEBUG_LOG<<"old memory size"<<Param.rule_exact->memManager.pShm->iCurSize<<endi;
+								     		  DEBUG_LOG<<"old begin address"<<Param.rule_exact->memManager.RealVarShm<<endi;
+								     		  DEBUG_LOG<<"old current address"<<Param.rule_exact->memManager.ShmVarPos<<endi;
+								     		  										
+			      			  		try
+			      			  			{
+			      			  			  char szRuleFieldAll[CALCFEE_RULE_LEN_MAX];
+			      			  			  char szExpirationDate[15];
+			      			  			  
+			      			  			  getCurTime(szExpirationDate);
+			      			  			  time2TimeStr(timeStr2Time(szExpirationDate) - (Param.iRuleExpirationDate * 86400), szExpirationDate);
+			      			  			  
+			      			  			  strcpy(Param.rstmp.szRateRule , szRuleFieldAll);
+			      			  			  Param.rule_exact->rewindFile();
+			      			  			  while (Param.rule_exact->readFromFile(Param.rstmp) == true)
+			      			  			  {
+			      			  			    if ((CheckRuleExact(Param.szDebugFlag, Param.rsblur, Param.iBlurCount, Param.rstmp) == 0)
+			      			  			      && (strcmp(Param.rstmp.szUpdateTime, szExpirationDate) >= 0))
+			      			  			      if (Param.rule_exact->insertRule(Param.rstmp)==false)
+			  	                      {
+			  	      	                 DEBUG_LOG<<"insert rule fail!"<<endd;
+			  	                      }
+			      			  			     
+			      			  			  }
+			      			  			  Param.rule_exact->closeRuleFile();
+			      			  			  Param.rule_exact->clearIncreasedNo();
+			      			  			  DEBUG_LOG<<"ReLoad rule_exact into memory successfully!"<<endd;
+			      			  			}
+			      			  		catch (jsexcp::CException e)
+			      			  			{
+														e.PushStack(CALCFEE_ERR_IN_LOAD_TABLE, "Load rule_exact into memory failed!", __FILE__,__LINE__);
+														Param.rule_exact->memManager.filelock.UnLock();
+														throw e;
+			      			  			}
+			      			  		Param.rule_exact->loadTmpMap();
+			      			 			Param.rule_exact->saveRule(Param.szRuleExactFileBak);
+			      			 			Param.rule_exact->iTotalNo = Param.rule_exact->memManager.pShm->iRuleCount;
+			      			  		DEBUG_LOG<<"Save exact rule completed,total exact rule count is "<<Param.rule_exact->getTotalNo()<<";"<<endd;
+			      			  		Param.MemVersion = Param.rule_exact->memManager.pShm->MemVersion;
+			      			  	}
+			      			  else
+			      			  	{
+												Param.rule_exact->loadTmpMap();
+												Param.rule_exact->iTotalNo = Param.rule_exact->memManager.pShm->iRuleCount;
+												Param.MemVersion = ++Param.rule_exact->memManager.pShm->MemVersion;
+			      			  		Param.rule_exact->saveRule(Param.szRuleExactFileBak);
+			      			  		DEBUG_LOG<<"Save exact rule completed,total exact rule count is "<<Param.rule_exact->getTotalNo()<<";"<<endd;
+
+			      			  	}
+			      			  		Param.rule_exact->clearIncreasedNo();
+			      			  		
+										for(int i=0; i<MAX_PROC_NUM; i++)
+										{
+											Param.rule_exact->memManager.pShm->m_Process[i].isLoadFlag = 0;//更新完毕
+										}			      			  		
+			      			  Param.rule_exact->memManager.filelock.UnLock();
+			      			  	
+			      			}				
+				break;				
+			/*批次结束，提交文件*/
+			case  MESSAGE_END_BATCH_END_FILES:  
+				
+				
+				break;
+			/*批次结束，提交数据库数据*/
+			case  MESSAGE_END_BATCH_END_DATA: 
+				
+				break;
+			/*批次异常中断*/
+			case  MESSAGE_BREAK_BATCH: 
+				
+				break;
+			/* 文件开始 */
+			case  MESSAGE_NEW_FILE:
+DEALFILE:	if(Param.rule_exact->memManager.pShm->m_Process[Param.rule_exact->MemIndex].isLoadFlag == 0)
+					{
+						Param.rule_exact->memManager.filelock.Lock();
+						Param.rule_exact->memManager.pShm->m_Process[Param.rule_exact->MemIndex].iSleepFlag = 1;
+    				//***********************************************************
+    				// 检查是否需要更新内存中的rule & rate数据
+    				//***********************************************************
+			  		char szUpdateFlag[2];
+			    	ds.Open("select need_update from c_rule_update where Source_Group=:SourceGroup \
+			       	and rule_name= :rule_name", SELECT_QUERY );
+			    	ds<<Param.szSourceGroup<<Param.rate_config.szRulePipeName;
+			   		if (!(ds>>szUpdateFlag))
+			    		{
+			      		strcpy(szLogStr, "C_RULE_UPDATE中对应RULE_NAME的数据不存在");
+								jsexcp::CException e(CALCFEE_ERR_IN_SELECT_DB, szLogStr, __FILE__, __LINE__);
+								throw e;
+			    		}
+			    	ds.Close();
+			
+			    	if (strcmp(szUpdateFlag, "Y") == 0 || Param.rule_exact->memManager.pShm->MemVersion > Param.MemVersion)
+			    		{
+			      		FreeRuleStruct(Param.szDebugFlag, &Param.rsblur, Param.iBlurCount);
+			      		FreeRateStruct(Param.szDebugFlag, &Param.ratestruct);
+			      		FreeAdjRateStruct(Param.szDebugFlag, &Param.adjratestruct);
+			      		Param.rule_exact->clearRule();
+			     			Param.rule_blur->clearRule();
+			      		Param.rule_blur->travel();
+			      		Param.rate_group->clear();
+			      		Param.charge_type->clear();
+			
+			      		//将模糊匹配RULE数据由数据表载入内存
+					      DEBUG_LOG<<"Loading table "<<Param.rate_config.szTablenameRule<<" into memory..."<<endd;
+			      		if (InitRuleStruct(Param.szDebugFlag, &Param.rsblur, Param.rate_config.szTablenameRule,
+			        		Param.szRuleFieldName, Param.iBlurCount, Param.iBlurMax, "") == 0)
+			      			{
+					      		DEBUG_LOG<<"Load table "<<Param.rate_config.szTablenameRule<<" into memory successfully!"<<endd;
+			      			}
+			     		 	else
+			      			{
+			        			sprintf(szLogStr, "Load table %s into memory failed!", Param.rate_config.szTablenameRule);
+										jsexcp::CException e(CALCFEE_ERR_IN_LOAD_TABLE, szLogStr, __FILE__, __LINE__);
+										throw e;			        			
+			      			}
+								
+								//将精确匹配RULE数据由文件载入内存
+								if ( Param.bUseRuleMatch == true && Param.rule_exact->memManager.pShm->MemVersion == Param.MemVersion)
+									{
+										DEBUG_LOG<<"new file 1!"<<endd;
+									  DEBUG_LOG<<"Loading rule_exact into memory..."<<endd;
+									  if((Param.rule_exact->memManager.ShmVarPos - Param.rule_exact->memManager.RealVarShm + Param.rule_exact->getIncreasedNo()+10000)*sizeof(SRuleVar)  > Param.rule_exact->memManager.pShm->iCurSize )
+								    {
+								    		 
+								     	 DEBUG_LOG<<"apply for new memory"<<endd;
+								     	 DEBUG_LOG<<"old memory size"<<Param.rule_exact->memManager.pShm->iCurSize<<endd;
+								     	 DEBUG_LOG<<"old begin address"<<Param.rule_exact->memManager.RealVarShm<<endd;
+								     	 DEBUG_LOG<<"old current address"<<Param.rule_exact->memManager.ShmVarPos<<endd;
+								     		 
+											 Param.rule_exact->memManager.Rebuild(Param.rule_exact->getIncreasedNo()*sizeof(SRuleVar)/(50*1024*1024)+1);//重建共享内存
+											 Param.rule_exact->clearRule();
+												  
+											 DEBUG_LOG<<"old memory size"<<Param.rule_exact->memManager.pShm->iCurSize<<endd;
+								     	 DEBUG_LOG<<"old begin address"<<Param.rule_exact->memManager.RealVarShm<<endd;
+								     	 DEBUG_LOG<<"old current address"<<Param.rule_exact->memManager.ShmVarPos<<endd;
+								    }
+								    
+									  try
+									  	{
+									  	  char szRuleFieldAll[CALCFEE_RULE_LEN_MAX];
+									  	  char szExpirationDate[15];
+									  	  
+									  	  getCurTime(szExpirationDate);
+									  	  time2TimeStr(timeStr2Time(szExpirationDate) - (Param.iRuleExpirationDate * 86400), szExpirationDate);
+									  	  
+									  	  strcpy(Param.rstmp.szRateRule , szRuleFieldAll);
+									  	  Param.rule_exact->rewindFile();
+									  	  while (Param.rule_exact->readFromFile(Param.rstmp) == true)
+									  	  {
+									  	    if ((CheckRuleExact(Param.szDebugFlag, Param.rsblur, Param.iBlurCount, Param.rstmp) == 0)
+									  	      && (strcmp(Param.rstmp.szUpdateTime, szExpirationDate) >= 0))
+									  	      if (Param.rule_exact->insertRule(Param.rstmp)==false)
+			  	                  {
+			  	      	             DEBUG_LOG<<"insert rule fail!"<<endd;
+			  	                  }
+									  	      
+									  	  }
+									  	  Param.rule_exact->closeRuleFile();
+									  	  //Param.rule_exact->saveRule(Param.szRuleExactFileBak);
+									  	  Param.rule_exact->clearIncreasedNo();
+									  	  DEBUG_LOG<<"Load rule_exact into memory successfully!"<<endd;
+									  	}
+									  catch (jsexcp::CException e)
+									  	{
+												e.PushStack(CALCFEE_ERR_IN_LOAD_TABLE, "Load rule_exact into memory failed!", __FILE__,__LINE__);
+												Param.rule_exact->memManager.filelock.UnLock();
+												throw e;
+									  	}
+									  Param.rule_exact->iTotalNo = Param.rule_exact->memManager.pShm->iRuleCount;
+									  Param.rule_exact->RuleMapTemp.clear();//丢弃临时收集规则
+									  Param.rule_exact->clearIncreasedNo();
+			      			 	Param.rule_exact->saveRule(Param.szRuleExactFileBak);
+									  Param.rule_exact->memManager.pShm->MemVersion ++;
+									  Param.MemVersion= Param.rule_exact->memManager.pShm->MemVersion;
+								}
+								else if (Param.bUseRuleMatch == true && Param.rule_exact->memManager.pShm->MemVersion > Param.MemVersion)
+									{
+										DEBUG_LOG<<"new file 2!"<<endd;
+										Param.rule_exact->loadRuleMap();
+										Param.rule_exact->iTotalNo = Param.rule_exact->memManager.pShm->iRuleCount;
+										Param.rule_exact->RuleMapTemp.clear();//丢弃临时收集规则
+										Param.rule_exact->clearIncreasedNo();
+										Param.MemVersion = Param.rule_exact->memManager.pShm->MemVersion;
+									}
+
+			      		
+			      		//将RATEGROUP数据由数据表载入内存
+			      		DEBUG_LOG<<"Loading table "<<Param.rate_config.szTablenameRateGroup<<" into memory..."<<endd;
+			      		if (Param.rate_group->init(Param.rate_config.szTablenameRateGroup, Param.rate_config.szTablenameRateLevel, Param.rate_config.szTablenameGroupLevel, Param.szDebugFlag) == true)
+			      			{
+			      			  DEBUG_LOG<<"Load table "<<Param.rate_config.szTablenameRateGroup<<" into memory successfully!"<<endd;
+			      			}
+			      		else
+			      			{
+			      			  sprintf(szLogStr, "Load table %s into memory failed!", Param.rate_config.szTablenameRateGroup);
+										jsexcp::CException e(CALCFEE_ERR_IN_LOAD_TABLE, szLogStr, __FILE__, __LINE__);
+										throw e;
+			      			}
+			      		
+			      		//将CHARGETYPE数据由数据表载入内存
+			      		DEBUG_LOG<<"Loading table "<<Param.rate_config.szTablenameChargeType<<" into memory..."<<endd;
+			      		if (Param.charge_type->init(Param.rate_config.szTablenameChargeType, Param.szDebugFlag) == true)
+			      			{
+			      			  DEBUG_LOG<<"Load table "<<Param.rate_config.szTablenameChargeType<<" into memory successfully!"<<endd;
+			      			}
+			      		else
+			      			{
+			      			  sprintf(szLogStr, "Load table %s into memory failed!", Param.rate_config.szTablenameChargeType);
+										jsexcp::CException e(CALCFEE_ERR_IN_LOAD_TABLE, szLogStr, __FILE__, __LINE__);
+										throw e;
+			      			}
+			      		
+			      		//将RATE数据由数据表载入内存
+			      		DEBUG_LOG<<"Loading table "<<Param.rate_config.szTablenameRate<<" into memory..."<<endd;
+			      		if (InitRateStruct(Param.szDebugFlag, &Param.ratestruct, Param.iRateCount, Param.rate_config.szTablenameRate) == 0)
+			      			{
+			      			  DEBUG_LOG<<"Load table "<<Param.rate_config.szTablenameRate<<" into memory successfully!"<<endd;
+			      			}
+			      		else
+			      			{
+			      		  	sprintf(szLogStr, "Load table %s into memory failed!", Param.rate_config.szTablenameRate);
+										jsexcp::CException e(CALCFEE_ERR_IN_LOAD_TABLE, szLogStr, __FILE__, __LINE__);
+										throw e;
+			      			}
+			      		
+			      		//将ADJRATE数据由数据表载入内存
+			      		DEBUG_LOG<<"Loading table "<<Param.rate_config.szTablenameAdjrate<<" into memory..."<<endd;
+			      		if (InitAdjRateStruct(Param.szDebugFlag, &Param.adjratestruct, Param.iAdjRateCount, Param.rate_config.szTablenameAdjrate) == 0)
+			      			{
+			      			  DEBUG_LOG<<"Load table "<<Param.rate_config.szTablenameAdjrate<<" into memory successfully!"<<endd;
+			      			}
+			      		else
+			      			{
+			      		  	sprintf(szLogStr, "Load table %s into memory failed!", Param.rate_config.szTablenameAdjrate);
+										jsexcp::CException e(CALCFEE_ERR_IN_LOAD_TABLE, szLogStr, __FILE__, __LINE__);
+										throw e;
+			      			}
+			      		
+			      		DEBUG_LOG<<"iExactCount 			= "<<Param.rule_exact->getTotalNo()	<<endd;
+			      		DEBUG_LOG<<"iBlurCount  			= "<<Param.rule_blur->getCount()		<<endd;
+			      		DEBUG_LOG<<"iRateGroupCount 	= "<<Param.rate_group->getCount()		<<endd;
+			      		DEBUG_LOG<<"iChargeTypeCount =	"<<Param.charge_type->getCount()	<<endd;
+			      		DEBUG_LOG<<"iRateCount				=	"<<Param.iRateCount								<<endd;
+			      		DEBUG_LOG<<"iAdjRateCount		=	"<<Param.iAdjRateCount						<<endd;
+			      		
+			      		//Set update flag
+			      		getCurTime(szCurDatetime);
+			      		ds.Open("update c_rule_update set need_update='N', update_time=:szCurDatetime \
+			      		   where Source_Group=:SourceGroup and rule_name=:rule_name", NONSELECT_DML);
+			      		ds<<szCurDatetime<<Param.szSourceGroup<<Param.rate_config.szRulePipeName;
+			      		ds.Execute();
+			      		ds.Close();
+			      		DBConn.Commit();
+			      	}						
+						Param.rule_exact->memManager.filelock.UnLock();
+						/*if(Param.MemVersion < Param.rule_exact->memManager.pShm->MemVersion)
+							{
+								theLog<<"ReLoad RuleMap from the Updated Share memory..."<<endd;
+								Param.rule_exact->loadRuleMap();
+								Param.MemVersion = Param.rule_exact->memManager.pShm->MemVersion;
+							}*/
+						
+						
+						strcpy(Param.szSourceId, pMessage.getSourceId());
+						strcpy(Param.szFileName, pMessage.getFileName());
+						
+						ds.Open("select b.source_path from i_source_define b where b.source_id=:source_id", SELECT_QUERY );
+			    	ds<<Param.szSourceId;
+			   		if (!(ds>>Param.szSourcePath))
+			    		{
+			      		strcpy(szLogStr, "i_source_define中对应source_id的数据不存在");
+								jsexcp::CException e(CALCFEE_ERR_IN_SELECT_DB, szLogStr, __FILE__, __LINE__);
+								throw e;
+			    		}
+			    	ds.Close();
+			      
+
+			    }
+			else{
+			    	DEBUG_LOG<<"等待其他进程更新共享内存区域...."<<endd;
+			    	sleep(10);			    	
+			    	goto DEALFILE;
+			    	
+			    }				
+						break;
+			/* 文件结束 */
+			case  MESSAGE_END_FILE:
+						Param.rule_exact->memManager.pShm->m_Process[Param.rule_exact->MemIndex].iSleepFlag = 0;
+						break;
+			default:
+				break;
+		}
+		
+	}
+     

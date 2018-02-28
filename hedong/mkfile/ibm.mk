@@ -1,0 +1,9 @@
+CXX_COMPILER=xlC
+COMPILE_THREAD_FLAG=-qthreaded
+ARCHIVE_FLAG=-X64
+
+#choose target platform: _WINDOWS | _SUNOS | _HPOS | _UNIXWARE
+#choose target compiler: _MS_VC | _SUN_CC | _HP_ACC | _UW_CC
+
+PLATFORM_COMPILE_FLAG=-D_IBMOS -D_IBM_XLC -q64
+PLATFORM_LINK_FLAG=-brtl -q64
